@@ -1,6 +1,6 @@
 const GEMINI_KEY_STORAGE = "thriftscan_gemini_key";
 const RECENT_SCANS_STORAGE = "thriftscan_recent_scans_v2";
-const GEMINI_MODEL = "gemini-3.5-flash-lite";
+const GEMINI_MODEL = "gemini-2.5-flash";
 let backendAvailable = false;
 
 const multiPhotos = {
@@ -28,7 +28,7 @@ function buildCompQuery(text, maxWords) {
   const limit = maxWords || 7;
   return String(text || "")
     .replace(/[^a-zA-Z0-9\s-]/g, " ")
-    .replace(/\b(vintage|mens|womens|used|new|pre-owned|shirt|t-shirt|tee|top|item|garment)\b/gi, " ")
+    .replace(/\b(mens|womens|used|new|pre-owned|item|garment)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim()
     .split(" ")
@@ -122,7 +122,7 @@ function renderDirectCompsFeed(cleanQuery, exactPlus, plus) {
 
   const modeNote = backendAvailable
     ? '<div class="empty-history">Live eBay Browse API active for this query.</div>'
-    : '<div class="empty-history">Browser-Only Mode: live API rows require the Java backend with eBay API keys. Use the direct eBay comp links below:</div>';
+    : '<div class="empty-history">Browser-Only Mode: tap a direct eBay comp link below to verify sold prices:</div>';
 
   listEl.innerHTML = modeNote + rows.map(function (r) {
     return (
@@ -177,23 +177,25 @@ function renderEvidenceReport(parsed) {
   const listEl = $("evidenceList");
   const tipEl = $("resellerTip");
 
-  const era = parsed.estimatedEra || "Era: Needs tag/stitch check";
-  const codes = parsed.tagOrStyleCodes || "Tag / RN / Style Code: None visible";
-  const conf = Math.max(0, Math.min(100, parseInt(parsed.confidenceScore, 10) || 50));
+  const era = parsed.estimatedEra || "Needs tag & hem stitch check";
+  const blank = parsed.blankOrTagType ? " | Blank/Tag: " + parsed.blankOrTagType : "";
+  const stitch = parsed.stitchingNotes ? " | Stitch: " + parsed.stitchingNotes : "";
+  const codes = parsed.tagOrStyleCodes || "None visible";
+  const conf = Math.max(0, Math.min(100, parseInt(parsed.confidenceScore, 10) || 45));
   const points = Array.isArray(parsed.evidencePoints) && parsed.evidencePoints.length
     ? parsed.evidencePoints
-    : ["Inspect neck tag font/color, care tag style code, and graphic placement to confirm exact release."];
+    : ["Snap a close-up of the neck tag, care tag style code, and sleeve hem stitch to lock in the era."];
 
-  if (eraEl) eraEl.textContent = "Era: " + era;
-  if (codesEl) codesEl.textContent = "Codes / Tag: " + codes;
+  if (eraEl) eraEl.textContent = "Era: " + era + blank;
+  if (codesEl) codesEl.textContent = "Codes / RN#: " + codes + stitch;
 
   if (badgeEl) {
     badgeEl.textContent = "Confidence: " + conf + "%";
-    badgeEl.className = "confidence-pill " + (conf >= 75 ? "high" : (conf >= 50 ? "med" : "low"));
+    badgeEl.className = "confidence-pill " + (conf >= 78 ? "high" : (conf >= 52 ? "med" : "low"));
   }
 
   if (listEl) {
-    listEl.innerHTML = points.slice(0, 4).map(function (pt) {
+    listEl.innerHTML = points.slice(0, 5).map(function (pt) {
       return "<li>" + escapeHtml(pt) + "</li>";
     }).join("");
   }
@@ -471,8 +473,8 @@ async function fetchEbayVisualMatches(base64Jpeg, queryHint) {
 }
 
 function compressDataUrl(dataUrl, maxDim, quality) {
-  const limit = maxDim || 1400;
-  const q = quality || 0.88;
+  const limit = maxDim || 1600;
+  const q = quality || 0.90;
   return new Promise(function (resolve, reject) {
     const img = new Image();
     img.onload = function () {
@@ -514,22 +516,58 @@ function compressImageFile(file, maxDim, quality) {
   });
 }
 
-function buildEvidencePrompt(multiMode) {
+function buildBidstitchPrompt(multiMode) {
   const intro = multiMode
-    ? "You are a vintage & secondhand garment authenticator like Bidstitch. Analyze all attached photos together (Tag/RN#, Front, and/or Back)."
-    : "You are a vintage & secondhand garment authenticator like Bidstitch. Analyze this photo and state only concrete physical evidence.";
+    ? "You are a senior vintage & secondhand clothing authenticator like Bidstitch. Cross-check all attached photos (Tag/RN#, Front, and/or Back) step by step."
+    : "You are a senior vintage & secondhand clothing authenticator like Bidstitch. Inspect every visible detail of this item step by step.";
 
   return [
     intro,
-    "Do NOT invent tag text, RN numbers, or style codes that are not visible.",
-    "Lower confidenceScore whenever a neck tag or care/style tag is missing or blurry.",
-    "Build 3 candidate queries (5-7 specific words each, avoiding generic words like 'shirt' or 'tee'):",
-    "1) Tag / Style Code query (if tag/code visible, else exact visual graphic + color)",
-    "2) Visual / Era query (graphic layout, font/arch, logo placement, color, era)",
-    "3) Broad brand + visual fallback",
-    "Return ONLY valid JSON with keys:",
-    '{"itemName":"Specific title","estimatedEra":"e.g. Modern / Y2K / 90s","tagOrStyleCodes":"Visible codes or None visible","confidenceScore":65,"evidencePoints":["Physical observation 1","Physical observation 2"],"candidateQueries":[{"label":"Code/Tag","query":"..."},{"label":"Visual/Era","query":"..."},{"label":"Broad","query":"..."}],"ebayShortQuery":"Best primary 5-7 word query","suggestedSalePrice":45,"resellerTip":"What to check on tag/stitching before buying"}'
+    "STRICT AUTHENTICATION RULES:",
+    "1. TAG & BLANK FINGERPRINTING: Read exact neck tag font, color, copyright year, RN/CA number (e.g., RN 56323 Nike, RN 14806 Carhartt, RN 15763 Hanes), country of manufacture (Made in USA vs Mexico/Honduras/China), blank brand (Screen Stars, Giant, Brockum, Hanes Beefy-T, Anvil, Gildan), and care tag style codes.",
+    "2. STITCHING & CONSTRUCTION: Check visible sleeve/bottom hem stitching (single stitch vs double stitch), collar rib width, tubular body vs side seams, and hardware/zipper markings (Talon, YKK, Scovill).",
+    "3. GRAPHIC & ERA CHECK: Identify exact print method (screenprint, plastisol, puff, embroidery, all-over print), licensing text, colorway, and exact era (e.g., 1980s, early 90s, late 90s Y2K, 2000s, Modern).",
+    "4. NO HALLUCINATION: Never guess or invent RN numbers or style codes not visible in the image. If the neck tag or hem is missing/blurry, explicitly state that and drop confidenceScore below 55.",
+    "5. BUILD 3 TARGETED COMP QUERIES (5-7 specific words each):",
+    "   - Query 1 ('Tag/Era'): Brand + Era/Tag/Blank + key subject + color",
+    "   - Query 2 ('Visual/Style'): Brand + specific graphic/cut/feature + color + item type",
+    "   - Query 3 ('Broad Comp'): Core 3-5 word fallback query",
+    "Return ONLY valid JSON with these exact keys:",
+    '{"itemName":"Exact Brand + Era/Tag + Model/Graphic + Color","estimatedEra":"e.g. Late 90s / Y2K (1998-2002)","blankOrTagType":"e.g. Nike Silver Tag / Screen Stars / Unverified","stitchingNotes":"e.g. Single stitch sleeves / Double stitch / Not visible","tagOrStyleCodes":"Exact visible codes/RN# or None visible","confidenceScore":72,"evidencePoints":["Tag/RN observation","Stitch/construction observation","Graphic/print/color observation","Era/value driver"],"candidateQueries":[{"label":"Tag/Era","query":"..."},{"label":"Visual/Style","query":"..."},{"label":"Broad","query":"..."}],"ebayShortQuery":"Best primary 5-7 word eBay comp query","suggestedSalePrice":45,"resellerTip":"Exact physical check to confirm authenticity & value before buying"}'
   ].join("\n");
+}
+
+async function callGeminiWithFallback(apiKey, parts) {
+  const modelsToTry = [GEMINI_MODEL, "gemini-2.5-flash-lite"];
+  let lastErr = null;
+
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const modelName = modelsToTry[i];
+    try {
+      const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" +
+        modelName + ":generateContent?key=" + encodeURIComponent(apiKey);
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: parts }],
+          generationConfig: { temperature: 0.1, response_mime_type: "application/json" }
+        })
+      });
+
+      const payload = await res.json();
+      if (!res.ok || payload.error) {
+        throw new Error((payload.error && payload.error.message) || ("HTTP " + res.status));
+      }
+
+      if ($("modelBadge")) $("modelBadge").textContent = modelName;
+      return payload;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("Gemini request failed");
 }
 
 function applyEvidenceResult(parsed, fallbackQuery, primaryBase64) {
@@ -572,35 +610,19 @@ async function analyzePhotoWithGemini(file) {
     return;
   }
 
-  const compressed = await compressImageFile(file, 1400, 0.88);
+  const compressed = await compressImageFile(file, 1600, 0.90);
   if ($("previewImg")) $("previewImg").src = compressed.dataUrl;
   if ($("previewWrap")) $("previewWrap").classList.remove("hidden");
   if ($("loaderBox")) $("loaderBox").classList.remove("hidden");
-  if ($("loaderText")) $("loaderText").textContent = "Inspecting visual & tag evidence...";
+  if ($("loaderText")) $("loaderText").textContent = "Running Bidstitch tag, stitch & era inspection...";
 
   try {
-    const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" +
-      GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(apiKey);
+    const parts = [
+      { text: buildBidstitchPrompt(false) },
+      { inline_data: { mime_type: compressed.mimeType, data: compressed.base64 } }
+    ];
 
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: buildEvidencePrompt(false) },
-            { inline_data: { mime_type: compressed.mimeType, data: compressed.base64 } }
-          ]
-        }],
-        generationConfig: { temperature: 0.1, response_mime_type: "application/json" }
-      })
-    });
-
-    const payload = await res.json();
-    if (!res.ok || payload.error) {
-      throw new Error((payload.error && payload.error.message) || ("HTTP " + res.status));
-    }
-
+    const payload = await callGeminiWithFallback(apiKey, parts);
     const raw = (payload.candidates &&
       payload.candidates[0] &&
       payload.candidates[0].content &&
@@ -631,8 +653,8 @@ async function applySlotCompressed(slotKey, compressed) {
 
 async function handleSlotSelect(slotKey, file) {
   if (!file) return;
-  const maxDim = slotKey === "tag" ? 1800 : 1280;
-  const compressed = await compressImageFile(file, maxDim, 0.9);
+  const maxDim = slotKey === "tag" ? 2000 : 1400;
+  const compressed = await compressImageFile(file, maxDim, 0.92);
   await applySlotCompressed(slotKey, compressed);
 }
 
@@ -642,7 +664,7 @@ function updateMultiScanButton() {
   const count = Object.values(multiPhotos).filter(Boolean).length;
   if (count > 0) {
     btn.classList.remove("hidden");
-    btn.textContent = "✨ Analyze Attached Photos (" + count + ")";
+    btn.textContent = "✨ Run Tag + Stitch Authentication (" + count + ")";
   } else {
     btn.classList.add("hidden");
   }
@@ -684,7 +706,7 @@ async function openCameraForTarget(target) {
   activeCamTarget = target;
   const labelMap = {
     quick: "📷 Quick Item Photo",
-    tag: "📷 Snap 1. Tag / RN#",
+    tag: "📷 Snap 1. Tag / RN# Close-Up",
     front: "📷 Snap 2. Front",
     back: "📷 Snap 3. Back"
   };
@@ -718,13 +740,13 @@ async function openCameraForTarget(target) {
   try {
     stopCameraStream();
     activeCamStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } },
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false
     });
     if ($("camVideo")) {
       $("camVideo").srcObject = activeCamStream;
     }
-    if ($("camStatusText")) $("camStatusText").textContent = "Ready — tap Snap Photo to capture.";
+    if ($("camStatusText")) $("camStatusText").textContent = "Hold steady — tap Snap Photo when tag text is crisp.";
   } catch (err) {
     if ($("camStatusText")) {
       $("camStatusText").textContent = "Camera unavailable (" + err.message + "). Opening camera picker...";
@@ -749,18 +771,18 @@ async function captureFromCameraModal() {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-  const rawDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+  const rawDataUrl = canvas.toDataURL("image/jpeg", 0.94);
 
   closeCameraModal();
 
   if (target === "quick") {
-    const compressed = await compressDataUrl(rawDataUrl, 1400, 0.88);
+    const compressed = await compressDataUrl(rawDataUrl, 1600, 0.90);
     const blob = await (await fetch(compressed.dataUrl)).blob();
     const file = new File([blob], "quick-scan.jpg", { type: "image/jpeg" });
     analyzePhotoWithGemini(file);
   } else {
-    const maxDim = target === "tag" ? 1800 : 1280;
-    const compressed = await compressDataUrl(rawDataUrl, maxDim, 0.9);
+    const maxDim = target === "tag" ? 2000 : 1400;
+    const compressed = await compressDataUrl(rawDataUrl, maxDim, 0.92);
     await applySlotCompressed(target, compressed);
   }
 }
@@ -772,11 +794,11 @@ async function runMultiAngleScan() {
     return;
   }
 
-  const parts = [{ text: buildEvidencePrompt(true) }];
+  const parts = [{ text: buildBidstitchPrompt(true) }];
   const labels = {
-    tag: "PHOTO 1 - NECK / CARE TAG & RN# CLOSE-UP:",
-    front: "PHOTO 2 - FRONT VIEW OF GARMENT:",
-    back: "PHOTO 3 - BACK VIEW OF GARMENT:"
+    tag: "PHOTO 1 - NECK / CARE TAG, BLANK LABEL & RN# CLOSE-UP:",
+    front: "PHOTO 2 - FRONT VIEW (GRAPHIC, COLLAR & SLEEVE STITCH):",
+    back: "PHOTO 3 - BACK VIEW (BACK PRINT, HEM & SEAMS):"
   };
 
   let attachedCount = 0;
@@ -803,26 +825,10 @@ async function runMultiAngleScan() {
   if (firstPreview && $("previewImg")) $("previewImg").src = firstPreview;
   if ($("previewWrap")) $("previewWrap").classList.remove("hidden");
   if ($("loaderBox")) $("loaderBox").classList.remove("hidden");
-  if ($("loaderText")) $("loaderText").textContent = "Cross-checking " + attachedCount + " angle(s) for evidence...";
+  if ($("loaderText")) $("loaderText").textContent = "Authenticating tag, blank & stitch across " + attachedCount + " photo(s)...";
 
   try {
-    const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" +
-      GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(apiKey);
-
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: parts }],
-        generationConfig: { temperature: 0.1, response_mime_type: "application/json" }
-      })
-    });
-
-    const payload = await res.json();
-    if (!res.ok || payload.error) {
-      throw new Error((payload.error && payload.error.message) || ("HTTP " + res.status));
-    }
-
+    const payload = await callGeminiWithFallback(apiKey, parts);
     const raw = (payload.candidates &&
       payload.candidates[0] &&
       payload.candidates[0].content &&
