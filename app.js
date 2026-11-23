@@ -27,6 +27,7 @@ function setStatusBadge(text, isOnline) {
 function buildCompQuery(text, maxWords) {
   const limit = maxWords || 7;
   return String(text || "")
+    .replace(/['’]/g, "")
     .replace(/[^a-zA-Z0-9\s-]/g, " ")
     .replace(/\b(vintage|mens|womens|used|new|pre-owned|shirt|t-shirt|tee|top|item|garment)\b/gi, " ")
     .replace(/\s+/g, " ")
@@ -89,40 +90,66 @@ function renderCandidatePills(candidates, activeQuery) {
   });
 }
 
-function renderDirectCompsFeed(cleanQuery, exactPlus, plus) {
+const EXCLUDE_TERMS = ["lot", "bundle", "kids", "youth", "toddler"];
+const SOLD_FLAGS = "&LH_Sold=1&LH_Complete=1&_sop=13";
+
+function cleanPhrase(text) {
+  return String(text || "").replace(/['’]/g, "").replace(/[^a-zA-Z0-9\s-]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// Adds "-lot -bundle ..." so multi-item lots and kids' sizes drop out of results
+function withExclusions(q) {
+  const lower = " " + q.toLowerCase() + " ";
+  return q + EXCLUDE_TERMS
+    .filter(function (w) { return lower.indexOf(" " + w + " ") === -1; })
+    .map(function (w) { return " -" + w; })
+    .join("");
+}
+
+function ebayUrl(queryText, flags, skipCategory) {
+  return "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(queryText).replace(/%20/g, "+") +
+    (skipCategory ? "" : "&_sacat=11450") + "&_ipg=120" + (flags || "");
+}
+
+// The tightest search we can build: style code first, then a short quoted key phrase
+function buildClosestMatch(clean) {
+  const r = lastReport || {};
+  const brand = cleanPhrase(r.brand);
+  const code = cleanPhrase(r.styleCode);
+  const phrase = cleanPhrase(r.exactPhrase);
+
+  if (code.length >= 4) {
+    return { label: "🎯 eBay Style Code SOLD", query: (brand + " " + code).trim(), tight: true };
+  }
+  if (phrase && phrase.split(" ").length >= 2) {
+    const used = phrase.toLowerCase().split(" ");
+    const rest = clean.split(" ").filter(function (w) {
+      return used.indexOf(w.toLowerCase()) === -1;
+    }).join(" ");
+    return { label: "🎯 eBay Key Phrase SOLD", query: ('"' + phrase + '" ' + rest).trim(), tight: false };
+  }
+  return { label: "🎯 eBay Closest-Match SOLD", query: clean, tight: false };
+}
+
+function renderDirectCompsFeed(cleanQuery) {
   const listEl = $("directCompsList");
   const metaEl = $("compsFeedMeta");
   if (!listEl) return;
 
-  const qPlus = plus || encodeURIComponent(cleanQuery).replace(/%20/g, "+");
-  const qExact = exactPlus || encodeURIComponent('"' + cleanQuery + '"').replace(/%20/g, "+");
+  const broad = withExclusions(cleanQuery);
+  const closest = buildClosestMatch(cleanQuery);
+  const closestQ = closest.tight ? closest.query : withExclusions(closest.query);
 
   const rows = [
-    {
-      label: "Sold & Completed (Recent First)",
-      tag: "SOLD",
-      href: "https://www.ebay.com/sch/i.html?_nkw=" + qPlus + "&LH_Sold=1&LH_Complete=1&_sop=13"
-    },
-    {
-      label: "Exact Phrase Sold Comps",
-      tag: "EXACT SOLD",
-      href: "https://www.ebay.com/sch/i.html?_nkw=" + qExact + "&LH_Sold=1&LH_Complete=1&_sop=13"
-    },
-    {
-      label: "Active Buy-It-Now (Lowest + Ship)",
-      tag: "ACTIVE",
-      href: "https://www.ebay.com/sch/i.html?_nkw=" + qPlus + "&LH_BIN=1&_sop=15"
-    },
-    {
-      label: "Active Auctions (Ending Soonest)",
-      tag: "AUCTION",
-      href: "https://www.ebay.com/sch/i.html?_nkw=" + qPlus + "&LH_Auction=1&_sop=1"
-    }
+    { label: "Sold & Completed (Recent First)", tag: "SOLD", href: ebayUrl(broad, SOLD_FLAGS) },
+    { label: closest.label.replace("🎯 ", ""), tag: "CLOSEST", href: ebayUrl(closestQ, SOLD_FLAGS, closest.tight) },
+    { label: "Active Buy-It-Now (Lowest + Ship)", tag: "ACTIVE", href: ebayUrl(broad, "&LH_BIN=1&_sop=15") },
+    { label: "Active Auctions (Ending Soonest)", tag: "AUCTION", href: ebayUrl(broad, "&LH_Auction=1&_sop=1") }
   ];
 
   const modeNote = backendAvailable
-    ? '<div class="empty-history">Live eBay Browse API active for this query.</div>'
-    : '<div class="empty-history">Browser-Only Mode: live API rows require the Java backend with eBay API keys. Use the direct eBay comp links below:</div>';
+    ? '<div class="empty-history">Live eBay data is active for this query.</div>'
+    : '<div class="empty-history">Browser-Only Mode: live listings need the Java backend with eBay API keys. Use the direct eBay links below:</div>';
 
   listEl.innerHTML = modeNote + rows.map(function (r) {
     return (
@@ -138,36 +165,33 @@ function renderDirectCompsFeed(cleanQuery, exactPlus, plus) {
   }
 }
 
+function setLink(id, href, label) {
+  const el = $(id);
+  if (!el) return;
+  el.href = href;
+  if (label) el.textContent = label;
+}
+
 function updateCompLinks(query, opts) {
   const clean = buildCompQuery(query, 7) || "Nike arched block swoosh brown";
   currentQueryText = clean;
   if ($("searchQueryInput")) $("searchQueryInput").value = clean;
 
-  const plus = encodeURIComponent(clean).replace(/%20/g, "+");
-  const exactPlus = encodeURIComponent('"' + clean + '"').replace(/%20/g, "+");
-  const encoded = encodeURIComponent(clean);
+  const broad = withExclusions(clean);
+  const closest = buildClosestMatch(clean);
+  const closestQ = closest.tight ? closest.query : withExclusions(closest.query);
 
-  if ($("linkEbaySold")) {
-    $("linkEbaySold").href = "https://www.ebay.com/sch/i.html?_nkw=" + plus + "&LH_Sold=1&LH_Complete=1&_sop=13";
-  }
-  if ($("linkEbayExactSold")) {
-    $("linkEbayExactSold").href = "https://www.ebay.com/sch/i.html?_nkw=" + exactPlus + "&LH_Sold=1&LH_Complete=1&_sop=13";
-  }
-  if ($("linkEbayActive")) {
-    $("linkEbayActive").href = "https://www.ebay.com/sch/i.html?_nkw=" + plus + "&_sop=15";
-  }
-  if ($("linkPoshSold")) {
-    $("linkPoshSold").href = "https://poshmark.com/search?query=" + encoded + "&availability=sold_out";
-  }
-  if ($("linkDepopSold")) {
-    $("linkDepopSold").href = "https://www.google.com/search?q=" + encodeURIComponent('site:depop.com "Sold" ' + clean);
-  }
+  setLink("linkEbaySold", ebayUrl(broad, SOLD_FLAGS));
+  setLink("linkEbayExactSold", ebayUrl(closestQ, SOLD_FLAGS, closest.tight), closest.label);
+  setLink("linkEbayActive", ebayUrl(broad, "&_sop=15"));
+  setLink("linkPoshSold", "https://poshmark.com/search?query=" + encodeURIComponent(clean) + "&availability=sold_out");
+  setLink("linkDepopSold", "https://www.google.com/search?q=" + encodeURIComponent('site:depop.com "Sold" ' + clean));
 
   if (!opts || !opts.keepCandidates) {
     renderCandidatePills([], clean);
   }
 
-  renderDirectCompsFeed(clean, exactPlus, plus);
+  renderDirectCompsFeed(clean);
   return clean;
 }
 
@@ -308,9 +332,9 @@ function renderRecentScans() {
       const entry = getRecentScans()[idx];
       if (!entry) return;
 
+      lastReport = entry.report || null;
       const clean = updateCompLinks(entry.query);
       if ($("itemTitleLabel")) $("itemTitleLabel").textContent = entry.title || clean;
-      lastReport = entry.report || null;
       visualItems = [];
       if (entry.report) renderEvidenceReport(entry.report);
       if (typeof entry.salePrice === "number" && entry.salePrice > 0 && $("salePriceInput")) {
@@ -495,6 +519,7 @@ function listingRowHtml(it, isSold) {
     const d = new Date(it.date);
     if (!isNaN(d.getTime())) meta.push("Sold " + d.toLocaleDateString([], { month: "short", day: "numeric" }));
   }
+  if (typeof it.score === "number" && it.score >= MATCH_MIN) meta.unshift("Close match");
   if (it.condition) meta.push(it.condition);
   const thumb = it.img
     ? '<img class="listing-thumb" loading="lazy" src="' + escapeHtml(safeUrl(it.img)) + '" alt="" />'
@@ -545,6 +570,8 @@ function renderMarket() {
     const bits = [];
     if (soldAvailable && typeof soldTotal === "number") bits.push(soldTotal + " sold (90 days)");
     if (typeof activeTotal === "number") bits.push(activeTotal + " active");
+    const closeCount = closeMatches(soldAvailable ? lastSoldItems.concat(pool) : pool).length;
+    if (pool.length || lastSoldItems.length) bits.push(closeCount + " close matches");
     metaEl.textContent = bits.length ? bits.join(" • ") : 'Search: "' + currentQueryText + '"';
   }
 }
@@ -571,21 +598,65 @@ function quantile(sorted, q) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
+const MATCH_MIN = 0.67; // a listing is a "close match" if it has at least this share of the key words
+const STOPWORDS = ["the", "and", "with", "for", "men", "mens", "women", "womens", "size", "new", "used"];
+
+function keyTokens() {
+  let words = [];
+  if (lastReport && Array.isArray(lastReport.mustHaveWords)) words = lastReport.mustHaveWords.slice();
+  if (!words.length) words = currentQueryText.split(" ");
+  const seen = {};
+  return words
+    .map(function (w) { return String(w || "").toLowerCase().replace(/[^a-z0-9\s-]/g, "").trim(); })
+    .filter(function (w) {
+      if (w.length < 2 || STOPWORDS.indexOf(w) !== -1 || seen[w]) return false;
+      seen[w] = true;
+      return true;
+    });
+}
+
+function relevance(title, tokens) {
+  if (!tokens.length) return 1;
+  const t = " " + String(title || "").toLowerCase().replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ") + " ";
+  let hits = 0;
+  tokens.forEach(function (tok) { if (t.indexOf(tok) !== -1) hits++; });
+  return hits / tokens.length;
+}
+
+function scoreAndSort(list, bySoldDate) {
+  const tokens = keyTokens();
+  list.forEach(function (it) { it.score = relevance(it.title, tokens); });
+  return list.sort(function (a, b) {
+    return (b.score - a.score) || (bySoldDate ? new Date(b.date) - new Date(a.date) : 0);
+  });
+}
+
+function closeMatches(items) {
+  return items.filter(function (i) { return typeof i.score !== "number" || i.score >= MATCH_MIN; });
+}
+
 function computeValuation(sold, active, report) {
-  const soldPrices = priceList(sold);
-  const activePrices = priceList(active);
-  let prices;
+  const closeSold = closeMatches(sold);
+  const closeActive = closeMatches(active);
+  let list;
   let source;
   let factor;
+  let loose = false;
 
-  if (soldPrices.length >= 3) {
-    prices = soldPrices; source = "sold"; factor = 1;
-  } else if (activePrices.length >= 3) {
-    prices = activePrices; source = "active"; factor = ASK_TO_SOLD;
+  // Prefer close matches. Only fall back to broader results if close ones are scarce.
+  if (priceList(closeSold).length >= 3) {
+    list = closeSold; source = "sold"; factor = 1;
+  } else if (priceList(closeActive).length >= 3) {
+    list = closeActive; source = "active"; factor = ASK_TO_SOLD;
+  } else if (priceList(sold).length >= 3) {
+    list = sold; source = "sold"; factor = 1; loose = true;
+  } else if (priceList(active).length >= 3) {
+    list = active; source = "active"; factor = ASK_TO_SOLD; loose = true;
   } else {
     return null;
   }
 
+  const prices = priceList(list);
   const med = quantile(prices, 0.5);
   const q1 = quantile(prices, 0.25);
   const q3 = quantile(prices, 0.75);
@@ -595,14 +666,17 @@ function computeValuation(sold, active, report) {
   const compScore = Math.min(prices.length / 20, 1) * 100;
   const tightScore = clamp(100 - spread * 100, 0, 100);
   const sourceScore = source === "sold" ? 100 : 60;
+  let confidence = Math.round(0.35 * photoScore + 0.3 * compScore + 0.2 * tightScore + 0.15 * sourceScore);
+  if (loose) confidence = Math.max(0, confidence - 15);
 
   return {
     source: source,
     count: prices.length,
+    loose: loose,
     estimate: med * factor,
     low: q1 * factor,
     high: q3 * factor,
-    confidence: Math.round(0.35 * photoScore + 0.3 * compScore + 0.2 * tightScore + 0.15 * sourceScore)
+    confidence: confidence
   };
 }
 
@@ -652,9 +726,10 @@ function renderValuation(v) {
   verdictActive = true;
   const conf = clamp(v.confidence, 0, 100);
   const badges = { sold: "eBay sold data", active: "Active listings", ai: "AI estimate" };
+  const kind = v.loose ? "" : " closely matching";
   const sources = {
-    sold: "Based on " + v.count + " eBay sold listings from the last 90 days.",
-    active: "Based on " + v.count + " active eBay listings, adjusted down because asking prices run higher than sold prices.",
+    sold: "Based on " + v.count + kind + " eBay sold listings from the last 90 days.",
+    active: "Based on " + v.count + kind + " active eBay listings, adjusted down because asking prices run higher than sold prices.",
     ai: "AI estimate only, because no matching eBay listings were found."
   };
 
@@ -667,6 +742,7 @@ function renderValuation(v) {
   }
 
   const notes = [sources[v.source]];
+  if (v.loose) notes.push("Few listings matched this item closely, so these are broader comparisons and less certain.");
   if (lastReport && lastReport.priceReasoning) notes.push(lastReport.priceReasoning);
   if (lastReport && lastReport.tagVisible === false) {
     notes.push("No readable tag was found. Add a tag close-up under Multi-Angle for a more accurate result.");
@@ -752,14 +828,18 @@ async function fetchEbayBrowseItems(query) {
   soldAvailable = Boolean(soldRes.ok && soldRes.data && soldRes.data.available);
   if (soldAvailable) {
     const soldData = soldRes.data.data || {};
-    lastSoldItems = (soldData.itemSales || [])
-      .map(function (it) { return normalizeListing(it, true); })
-      .sort(function (a, b) { return new Date(b.date) - new Date(a.date); });
+    lastSoldItems = scoreAndSort(
+      (soldData.itemSales || []).map(function (it) { return normalizeListing(it, true); }),
+      true
+    );
     if (typeof soldData.total === "number") soldTotal = soldData.total;
   }
 
   if (activeRes.ok && activeRes.data) {
-    lastActiveItems = (activeRes.data.itemSummaries || []).map(function (it) { return normalizeListing(it, false); });
+    lastActiveItems = scoreAndSort(
+      (activeRes.data.itemSummaries || []).map(function (it) { return normalizeListing(it, false); }),
+      false
+    );
     if (typeof activeRes.data.total === "number") activeTotal = activeRes.data.total;
   }
 
@@ -785,7 +865,10 @@ async function fetchEbayVisualMatches(base64Jpeg) {
     });
     const data = await res.json();
     if (!res.ok) return;
-    visualItems = (data.itemSummaries || []).map(function (it) { return normalizeListing(it, false); });
+    visualItems = scoreAndSort(
+      (data.itemSummaries || []).map(function (it) { return normalizeListing(it, false); }),
+      false
+    );
     renderMarket();
     runValuation();
   } catch (_) {
@@ -849,16 +932,19 @@ function buildEvidencePrompt(multiMode) {
     "Never infer an era from style alone. Lower confidenceScore whenever the neck tag or care tag is missing or blurry, and set tagVisible to false if no tag is clearly readable.",
     "Grade condition from visible wear only (fading, cracking, stains, holes, pilling).",
     "Give priceLow and priceHigh as a realistic US resale range in USD for this item in this condition, and explain it in one sentence in priceReasoning. If you cannot tell what the item is, use 0 for both.",
+    "Write queries the way an eBay seller would title the listing: brand + the most distinctive words printed on the item (graphic text, team, character, style code). Prefer fewer, more distinctive words over many generic ones.",
+    "Also return: brand, styleCode (only if clearly readable, else empty string), exactPhrase (the 2-3 word phrase that most uniquely identifies the design, as it would appear in a title), and mustHaveWords (2-4 lowercase words any matching listing title should contain).",
     "Build 3 candidate queries (5-7 specific words each, avoiding generic words like 'shirt' or 'tee'):",
     "1) Tag / Style Code query (if tag/code visible, else exact visual graphic + color)",
     "2) Visual / Era query (graphic layout, font/arch, logo placement, color, era)",
     "3) Broad brand + visual fallback",
     "Return ONLY valid JSON with keys:",
-    '{"itemName":"Specific title","estimatedEra":"e.g. Modern / Y2K / 90s","tagOrStyleCodes":"Visible codes or None visible","tagVisible":true,"confidenceScore":65,"evidencePoints":["Physical observation 1","Physical observation 2"],"condition":"Good: light fading, no stains","rarity":"Common / Uncommon / Rare, with a short reason","priceLow":25,"priceHigh":45,"priceReasoning":"One sentence on why this range","candidateQueries":[{"label":"Code/Tag","query":"..."},{"label":"Visual/Era","query":"..."},{"label":"Broad","query":"..."}],"ebayShortQuery":"Best primary 5-7 word query","suggestedSalePrice":35,"resellerTip":"What to check on tag/stitching before buying"}'
+    '{"itemName":"Specific title","estimatedEra":"e.g. Modern / Y2K / 90s","tagOrStyleCodes":"Visible codes or None visible","brand":"Nike","styleCode":"","exactPhrase":"arched block swoosh","mustHaveWords":["nike","arched","swoosh"],"tagVisible":true,"confidenceScore":65,"evidencePoints":["Physical observation 1","Physical observation 2"],"condition":"Good: light fading, no stains","rarity":"Common / Uncommon / Rare, with a short reason","priceLow":25,"priceHigh":45,"priceReasoning":"One sentence on why this range","candidateQueries":[{"label":"Code/Tag","query":"..."},{"label":"Visual/Era","query":"..."},{"label":"Broad","query":"..."}],"ebayShortQuery":"Best primary 5-7 word query","suggestedSalePrice":35,"resellerTip":"What to check on tag/stitching before buying"}'
   ].join("\n");
 }
 
 function applyEvidenceResult(parsed, fallbackQuery, primaryBase64) {
+  lastReport = parsed;
   const candidates = Array.isArray(parsed.candidateQueries) ? parsed.candidateQueries : [];
   const primaryRaw = parsed.ebayShortQuery
     || (candidates[0] && candidates[0].query)
@@ -1239,6 +1325,7 @@ function initApp() {
   if ($("searchBtn")) {
     $("searchBtn").addEventListener("click", function () {
       const currentVal = $("searchQueryInput") ? $("searchQueryInput").value : "";
+      lastReport = null;
       const q = updateCompLinks(currentVal);
       if ($("itemTitleLabel")) $("itemTitleLabel").textContent = q;
       lastReport = null;
