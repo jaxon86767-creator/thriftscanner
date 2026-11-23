@@ -2,7 +2,281 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewp<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1120" />
+  <title>ThriftScan Pro — Evidence & Comp Suite</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span>🏷️ ThriftScan Pro</span>
+      <span class="brand-badge">Evidence + JS</span>
+    </div>
+    <div class="header-actions">
+      <span class="status-pill" id="backendStatus">Checking Java...</span>
+      <button type="button" class="icon-btn" id="openSettingsBtn">⚙️ Key</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="card-title">
+        <span>1. Scan Item & Angles</span>
+        <span id="modelBadge" class="accent-text">gemini-3.5-flash-lite</span>
+      </div>
+
+      <div class="capture-grid">
+        <button type="button" class="capture-btn primary" id="quickCamBtn">
+          <span>📸</span>
+          <span>Take Photo</span>
+        </button>
+        <label class="capture-btn">
+          <span>🖼️</span>
+          <span>Upload Photo</span>
+          <input type="file" id="galleryInput" accept="image/*" class="hidden" />
+        </label>
+        <input type="file" id="cameraInput" accept="image/*" capture="environment" class="hidden" />
+      </div>
+
+      <div class="multi-scan-box">
+        <div class="multi-header">
+          <span>🎯 Multi-Angle Evidence Scan (Tag + Front + Back)</span>
+          <button type="button" class="mini-clear-btn" id="clearMultiBtn">Clear</button>
+        </div>
+        <p class="multi-sub">Snap 1. Tag / RN# close-up first for highest tag &amp; era accuracy, plus 2. Front and 3. Back.</p>
+
+        <div class="multi-slots-grid">
+          <div class="slot-card" id="slotLabelTag">
+            <img id="thumbTag" class="slot-thumb hidden" alt="Tag preview" />
+            <span class="slot-icon">🏷️</span>
+            <span class="slot-title">1. Tag / RN#</span>
+            <small id="statusTag">No photo</small>
+            <div class="slot-btns">
+              <button type="button" class="slot-action-btn cam" data-cam-slot="tag">📷 Cam</button>
+              <label class="slot-action-btn file">
+                🖼️ File
+                <input type="file" id="inputTagFile" accept="image/*" class="hidden" />
+              </label>
+            </div>
+            <input type="file" id="inputTagCam" accept="image/*" capture="environment" class="hidden" />
+          </div>
+
+          <div class="slot-card" id="slotLabelFront">
+            <img id="thumbFront" class="slot-thumb hidden" alt="Front preview" />
+            <span class="slot-icon">👕</span>
+            <span class="slot-title">2. Front</span>
+            <small id="statusFront">No photo</small>
+            <div class="slot-btns">
+              <button type="button" class="slot-action-btn cam" data-cam-slot="front">📷 Cam</button>
+              <label class="slot-action-btn file">
+                🖼️ File
+                <input type="file" id="inputFrontFile" accept="image/*" class="hidden" />
+              </label>
+            </div>
+            <input type="file" id="inputFrontCam" accept="image/*" capture="environment" class="hidden" />
+          </div>
+
+          <div class="slot-card" id="slotLabelBack">
+            <img id="thumbBack" class="slot-thumb hidden" alt="Back preview" />
+            <span class="slot-icon">🔄</span>
+            <span class="slot-title">3. Back</span>
+            <small id="statusBack">No photo</small>
+            <div class="slot-btns">
+              <button type="button" class="slot-action-btn cam" data-cam-slot="back">📷 Cam</button>
+              <label class="slot-action-btn file">
+                🖼️ File
+                <input type="file" id="inputBackFile" accept="image/*" class="hidden" />
+              </label>
+            </div>
+            <input type="file" id="inputBackCam" accept="image/*" capture="environment" class="hidden" />
+          </div>
+        </div>
+
+        <button type="button" class="btn-solid full-width-btn hidden" id="runMultiScanBtn">
+          ✨ Analyze Attached Photos (0)
+        </button>
+      </div>
+
+      <div class="manual-row">
+        <input type="text" id="searchQueryInput" value="Nike arched block swoosh brown" placeholder="Enter specific tag, style code, or visual query..." />
+        <button type="button" class="btn-solid" id="searchBtn">Search</button>
+      </div>
+
+      <div class="loader hidden" id="loaderBox">
+        <div class="spinner"></div>
+        <span id="loaderText">Working...</span>
+      </div>
+
+      <div class="preview-wrap hidden" id="previewWrap">
+        <img id="previewImg" alt="Preview" />
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <span>2. Evidence Report &amp; eBay Comps</span>
+        <span id="itemTitleLabel" class="accent-text">Nike Arched Block Swoosh Tee</span>
+      </div>
+
+      <div class="evidence-box" id="evidenceBox">
+        <div class="evidence-top">
+          <div>
+            <span class="evidence-era" id="evidenceEra">Era: Unverified</span>
+            <div class="evidence-codes" id="evidenceCodes">Tag / RN / Style Code: None read yet</div>
+          </div>
+          <span class="confidence-pill med" id="confidenceBadge">Confidence: —</span>
+        </div>
+        <ul class="evidence-list" id="evidenceList">
+          <li>Snap Tag / RN# + Front/Back for physical label, stitch, and graphic evidence.</li>
+        </ul>
+        <p id="resellerTip" class="tip-box">
+          Tip: If no tag photo is attached, verify neck tag color/logo, stitch type, and any style code before buying.
+        </p>
+      </div>
+
+      <div class="candidate-queries-wrap" id="candidateQueriesWrap">
+        <div class="candidate-label">Candidate Queries (Tap to Switch Comp Links)</div>
+        <div class="candidate-pills" id="candidatePills"></div>
+      </div>
+
+      <div class="links-grid">
+        <a id="linkEbaySold" class="comp-link ebay-sold" href="https://www.ebay.com/sch/i.html?_nkw=Nike+arched+block+swoosh+brown&LH_Sold=1&LH_Complete=1&_sop=13" target="_blank" rel="noopener">
+          🟢 eBay SOLD Comps (Recent First)
+        </a>
+        <a id="linkEbayExactSold" class="comp-link" href="https://www.ebay.com/sch/i.html?_nkw=%22Nike+arched+block+swoosh+brown%22&LH_Sold=1&LH_Complete=1&_sop=13" target="_blank" rel="noopener">
+          🎯 eBay Exact Phrase SOLD
+        </a>
+        <a id="linkEbayActive" class="comp-link" href="https://www.ebay.com/sch/i.html?_nkw=Nike+arched+block+swoosh+brown&_sop=15" target="_blank" rel="noopener">
+          🔵 eBay ACTIVE (Lowest + Ship)
+        </a>
+        <a id="linkPoshSold" class="comp-link" href="https://poshmark.com/search?query=Nike%20arched%20block%20swoosh%20brown&availability=sold_out" target="_blank" rel="noopener">
+          🩷 Poshmark SOLD
+        </a>
+        <a id="linkDepopSold" class="comp-link" href="https://www.google.com/search?q=site%3Adepop.com+%22Sold%22+Nike+arched+block+swoosh+brown" target="_blank" rel="noopener">
+          🔎 Depop Sold X-Ray
+        </a>
+      </div>
+
+      <div class="str-box">
+        <div class="str-header">
+          <span>📊 Sell-Through Rate (STR)</span>
+          <span id="strBadge" class="str-pill">Enter Sold &amp; Active</span>
+        </div>
+        <div class="str-inputs">
+          <label class="field">
+            <span>Sold Comps</span>
+            <input type="number" id="soldCountInput" min="0" step="1" placeholder="e.g. 24" />
+          </label>
+          <label class="field">
+            <span>Active Listings</span>
+            <input type="number" id="activeCountInput" min="0" step="1" placeholder="e.g. 36" />
+          </label>
+          <div class="str-result-box">
+            <small>Sell-Through</small>
+            <strong id="strDisplay">—</strong>
+          </div>
+        </div>
+        <div class="str-parse-row">
+          <input type="text" id="strQuickPasteInput" placeholder='Paste or type e.g. "24 sold, 36 active"...' />
+          <button type="button" class="mini-clear-btn" id="strParseBtn">Auto-Fill</button>
+        </div>
+      </div>
+
+      <div class="direct-comps-panel">
+        <div class="direct-comps-header">
+          <span>Live eBay Listings (Java Backend)</span>
+          <span id="compsFeedMeta" class="muted-text">Ready for query</span>
+        </div>
+        <div id="directCompsList" class="direct-comps-list"></div>
+        <div id="ebayApiResults" class="api-results hidden"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <span>3. Profit &amp; Max Buy Calculator</span>
+        <span id="calcSourceBadge" class="muted-text">Java /api/calc</span>
+      </div>
+
+      <div class="calc-grid">
+        <label class="field">
+          <span>Buy Cost ($)</span>
+          <input type="number" id="buyCostInput" value="12" min="0" step="0.50" />
+        </label>
+        <label class="field">
+          <span>Target Sale ($)</span>
+          <input type="number" id="salePriceInput" value="45" min="0" step="1" />
+        </label>
+        <label class="field">
+          <span>Shipping / Supplies ($)</span>
+          <input type="number" id="shippingInput" value="0" min="0" step="0.50" />
+        </label>
+        <label class="field">
+          <span>Desired Net Profit ($)</span>
+          <input type="number" id="targetProfitInput" value="25" min="0" step="1" />
+        </label>
+      </div>
+
+      <div class="metrics-row">
+        <div class="metric-box">
+          <small>Est. Net Profit</small>
+          <strong id="netProfitDisplay" class="pos">+$0.00</strong>
+        </div>
+        <div class="metric-box">
+          <small>Max Buy Price</small>
+          <strong id="maxBuyDisplay">$0.00</strong>
+        </div>
+        <div class="metric-box">
+          <small>ROI</small>
+          <strong id="roiDisplay">0%</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="recentScansCard">
+      <div class="card-title">
+        <span>4. Recent Scans</span>
+        <button type="button" class="mini-clear-btn" id="clearHistoryBtn">Clear History</button>
+      </div>
+      <div id="recentScansList" class="recent-scans-list">
+        <div class="empty-history">No scans saved yet. Run a scan or search to log items here.</div>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal-backdrop hidden" id="cameraModal">
+    <div class="modal cam-modal">
+      <h3 id="camModalTitle">📷 Take Photo</h3>
+      <video id="camVideo" autoplay playsinline muted></video>
+      <canvas id="camCanvas" class="hidden"></canvas>
+      <p id="camStatusText" class="cam-status">Point camera at your item or tag.</p>
+      <div class="modal-actions">
+        <button type="button" class="icon-btn" id="closeCamBtn">Cancel</button>
+        <button type="button" class="btn-solid" id="snapPhotoBtn">📸 Snap Photo</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="settingsModal">
+    <div class="modal">
+      <h3>⚙️ Gemini API Key</h3>
+      <p>Stored locally in your browser for evidence &amp; tag analysis.</p>
+      <input type="password" id="apiKeyInput" placeholder="AIzaSy..." />
+      <div class="modal-actions">
+        <button type="button" class="icon-btn" id="cancelSettingsBtn">Cancel</button>
+        <button type="button" class="btn-solid" id="saveSettingsBtn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>ort" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#0b1120" />
   <title>ThriftScan Pro — Java + JS Suite</title>
   <link rel="stylesheet" href="styles.css" />
