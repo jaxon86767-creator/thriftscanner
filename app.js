@@ -1,6 +1,6 @@
 const GEMINI_KEY_STORAGE = "thriftscan_gemini_key";
 const RECENT_SCANS_STORAGE = "thriftscan_recent_scans_v2";
-const GEMINI_MODEL = "gemini-3.8-flash";
+const GEMINI_MODEL = "gemini-3.5-flash-lite";
 let backendAvailable = false;
 
 const multiPhotos = {
@@ -28,7 +28,7 @@ function buildCompQuery(text, maxWords) {
   const limit = maxWords || 7;
   return String(text || "")
     .replace(/[^a-zA-Z0-9\s-]/g, " ")
-    .replace(/\b(mens|womens|used|new|pre-owned|item|garment)\b/gi, " ")
+    .replace(/\b(vintage|mens|womens|used|new|pre-owned|shirt|t-shirt|tee|top|item|garment)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim()
     .split(" ")
@@ -122,7 +122,7 @@ function renderDirectCompsFeed(cleanQuery, exactPlus, plus) {
 
   const modeNote = backendAvailable
     ? '<div class="empty-history">Live eBay Browse API active for this query.</div>'
-    : '<div class="empty-history">Browser-Only Mode: tap a direct eBay comp link below to verify sold prices:</div>';
+    : '<div class="empty-history">Browser-Only Mode: live API rows require the Java backend with eBay API keys. Use the direct eBay comp links below:</div>';
 
   listEl.innerHTML = modeNote + rows.map(function (r) {
     return (
@@ -140,6 +140,7 @@ function renderDirectCompsFeed(cleanQuery, exactPlus, plus) {
 
 function updateCompLinks(query, opts) {
   const clean = buildCompQuery(query, 7) || "Nike arched block swoosh brown";
+  currentQueryText = clean;
   if ($("searchQueryInput")) $("searchQueryInput").value = clean;
 
   const plus = encodeURIComponent(clean).replace(/%20/g, "+");
@@ -177,25 +178,20 @@ function renderEvidenceReport(parsed) {
   const listEl = $("evidenceList");
   const tipEl = $("resellerTip");
 
-  const era = parsed.estimatedEra || "Needs tag & hem stitch check";
-  const blank = parsed.blankOrTagType ? " | Blank/Tag: " + parsed.blankOrTagType : "";
-  const stitch = parsed.stitchingNotes ? " | Stitch: " + parsed.stitchingNotes : "";
-  const codes = parsed.tagOrStyleCodes || "None visible";
-  const conf = Math.max(0, Math.min(100, parseInt(parsed.confidenceScore, 10) || 45));
+  const era = parsed.estimatedEra || "Era: Needs tag/stitch check";
+  const codes = parsed.tagOrStyleCodes || "Tag / RN / Style Code: None visible";
+  const conf = Math.max(0, Math.min(100, parseInt(parsed.confidenceScore, 10) || 50));
   const points = Array.isArray(parsed.evidencePoints) && parsed.evidencePoints.length
     ? parsed.evidencePoints
-    : ["Snap a close-up of the neck tag, care tag style code, and sleeve hem stitch to lock in the era."];
+    : ["Inspect neck tag font/color, care tag style code, and graphic placement to confirm exact release."];
 
-  if (eraEl) eraEl.textContent = "Era: " + era + blank;
-  if (codesEl) codesEl.textContent = "Codes / RN#: " + codes + stitch;
+  if (eraEl) eraEl.textContent = "Era: " + era;
+  if (codesEl) codesEl.textContent = "Codes / Tag: " + codes;
 
-  if (badgeEl) {
-    badgeEl.textContent = "Confidence: " + conf + "%";
-    badgeEl.className = "confidence-pill " + (conf >= 78 ? "high" : (conf >= 52 ? "med" : "low"));
-  }
+  if (badgeEl) setConfidenceBadge(conf);
 
   if (listEl) {
-    listEl.innerHTML = points.slice(0, 5).map(function (pt) {
+    listEl.innerHTML = points.slice(0, 6).map(function (pt) {
       return "<li>" + escapeHtml(pt) + "</li>";
     }).join("");
   }
@@ -277,6 +273,12 @@ function renderRecentScans() {
   if (!listEl) return;
 
   const scans = getRecentScans();
+  const totalEl = $("collectionTotal");
+  if (totalEl) {
+    const valued = scans.filter(function (sc) { return typeof sc.salePrice === "number" && sc.salePrice > 0; });
+    const total = valued.reduce(function (sum, sc) { return sum + sc.salePrice; }, 0);
+    totalEl.textContent = valued.length ? valued.length + " valued items • est. total " + fmtMoney(total) : "";
+  }
   if (!scans.length) {
     listEl.innerHTML = '<div class="empty-history">No scans saved yet. Run a scan or search to log items here.</div>';
     return;
@@ -308,6 +310,8 @@ function renderRecentScans() {
 
       const clean = updateCompLinks(entry.query);
       if ($("itemTitleLabel")) $("itemTitleLabel").textContent = entry.title || clean;
+      lastReport = entry.report || null;
+      visualItems = [];
       if (entry.report) renderEvidenceReport(entry.report);
       if (typeof entry.salePrice === "number" && entry.salePrice > 0 && $("salePriceInput")) {
         $("salePriceInput").value = entry.salePrice.toFixed(2);
@@ -339,7 +343,7 @@ function saveRecentScan(entry) {
     timeLabel: timeLabel
   });
 
-  localStorage.setItem(RECENT_SCANS_STORAGE, JSON.stringify(filtered.slice(0, 12)));
+  localStorage.setItem(RECENT_SCANS_STORAGE, JSON.stringify(filtered.slice(0, 50)));
   renderRecentScans();
 }
 
@@ -413,50 +417,365 @@ async function calculateProfitAndMaxBuy() {
   }
   if ($("maxBuyDisplay")) $("maxBuyDisplay").textContent = "$" + maxBuyPrice.toFixed(2);
   if ($("roiDisplay")) $("roiDisplay").textContent = buyCost > 0 ? Math.round(roiPct) + "%" : "N/A";
+  updateVerdict(buyCost, salePrice, netProfit, maxBuyPrice);
 }
 
-function renderEbayApiItems(data, fallbackQuery) {
-  if (!$("ebayApiResults")) return;
-  if (!data || !Array.isArray(data.itemSummaries) || !data.itemSummaries.length) {
-    $("ebayApiResults").classList.add("hidden");
+// ---------- Market data (sold + active listings) and valuation ----------
+let lastReport = null;
+let lastSoldItems = [];
+let lastActiveItems = [];
+let visualItems = [];
+let soldAvailable = false;
+let soldTotal = null;
+let activeTotal = null;
+let verdictActive = false;
+let currentQueryText = "";
+let marketRequestId = 0;
+
+// Active asking prices usually run above what items really sell for. Tune this with your own results.
+const ASK_TO_SOLD = 0.85;
+
+function fmtMoney(n) {
+  const v = Number(n) || 0;
+  return "$" + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
+}
+
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function safeUrl(u) {
+  return typeof u === "string" && /^https:\/\//i.test(u) ? u : "#";
+}
+
+function pickImage(it) {
+  if (it.image && it.image.imageUrl) return it.image.imageUrl;
+  if (it.thumbnailImages && it.thumbnailImages[0] && it.thumbnailImages[0].imageUrl) {
+    return it.thumbnailImages[0].imageUrl;
+  }
+  return "";
+}
+
+function normalizeListing(it, sold) {
+  const priceObj = sold ? (it.lastSoldPrice || it.price) : it.price;
+  return {
+    title: it.title || "",
+    price: Number(priceObj && priceObj.value) || 0,
+    url: it.itemWebUrl || "",
+    img: pickImage(it),
+    condition: it.condition || "",
+    date: sold ? (it.lastSoldDate || "") : ""
+  };
+}
+
+async function fetchJsonSafe(url) {
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    return { ok: res.ok, data: data };
+  } catch (_) {
+    return { ok: false, data: null };
+  }
+}
+
+function getActivePool() {
+  if (lastActiveItems.length >= 3) return lastActiveItems;
+  const seen = {};
+  return lastActiveItems.concat(visualItems).filter(function (it) {
+    const key = it.url || it.title;
+    if (seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
+}
+
+function listingRowHtml(it, isSold) {
+  const meta = [];
+  if (isSold && it.date) {
+    const d = new Date(it.date);
+    if (!isNaN(d.getTime())) meta.push("Sold " + d.toLocaleDateString([], { month: "short", day: "numeric" }));
+  }
+  if (it.condition) meta.push(it.condition);
+  const thumb = it.img
+    ? '<img class="listing-thumb" loading="lazy" src="' + escapeHtml(safeUrl(it.img)) + '" alt="" />'
+    : '<div class="listing-thumb listing-thumb-empty"></div>';
+  return (
+    '<a class="listing-row" href="' + escapeHtml(safeUrl(it.url)) + '" target="_blank" rel="noopener">' +
+    thumb +
+    '<div class="listing-info"><span class="listing-title">' + escapeHtml(it.title) + "</span>" +
+    "<small>" + escapeHtml(meta.join(" • ")) + "</small></div>" +
+    '<strong class="listing-price' + (isSold ? " sold" : "") + '">' + (it.price > 0 ? fmtMoney(it.price) : "N/A") + "</strong>" +
+    "</a>"
+  );
+}
+
+function setMarketLoading() {
+  const loading = '<div class="empty-history">Loading listings...</div>';
+  if ($("soldList")) $("soldList").innerHTML = loading;
+  if ($("activeList")) $("activeList").innerHTML = loading;
+  if ($("soldNote")) $("soldNote").classList.add("hidden");
+}
+
+function renderMarket() {
+  const soldEl = $("soldList");
+  const activeEl = $("activeList");
+  const noteEl = $("soldNote");
+  const metaEl = $("listingsMeta");
+  if (!soldEl || !activeEl) return;
+
+  if (soldAvailable) {
+    if (noteEl) noteEl.classList.add("hidden");
+    soldEl.innerHTML = lastSoldItems.length
+      ? lastSoldItems.slice(0, 8).map(function (it) { return listingRowHtml(it, true); }).join("")
+      : '<div class="empty-history">No sold listings found for this search in the last 90 days.</div>';
+  } else {
+    soldEl.innerHTML = "";
+    if (noteEl) {
+      noteEl.classList.remove("hidden");
+      noteEl.textContent = "eBay only shares sold prices with approved developers, and this app doesn't have that access yet. The value above uses active listings instead. Open the sold links below to check sold prices by hand.";
+    }
+  }
+
+  const pool = getActivePool();
+  activeEl.innerHTML = pool.length
+    ? pool.slice(0, 8).map(function (it) { return listingRowHtml(it, false); }).join("")
+    : '<div class="empty-history">No active listings found. Try a shorter search.</div>';
+
+  if (metaEl) {
+    const bits = [];
+    if (soldAvailable && typeof soldTotal === "number") bits.push(soldTotal + " sold (90 days)");
+    if (typeof activeTotal === "number") bits.push(activeTotal + " active");
+    metaEl.textContent = bits.length ? bits.join(" • ") : 'Search: "' + currentQueryText + '"';
+  }
+}
+
+function renderMarketUnavailable() {
+  if ($("activeList")) {
+    $("activeList").innerHTML = '<div class="empty-history">Live listings need the Java backend. Start ThriftScanServer with your eBay keys, or use the eBay, Poshmark and Depop links below.</div>';
+  }
+  if ($("soldList")) $("soldList").innerHTML = "";
+  if ($("soldNote")) $("soldNote").classList.add("hidden");
+}
+
+function priceList(items) {
+  return items
+    .map(function (i) { return i.price; })
+    .filter(function (p) { return p > 0; })
+    .sort(function (a, b) { return a - b; });
+}
+
+function quantile(sorted, q) {
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+function computeValuation(sold, active, report) {
+  const soldPrices = priceList(sold);
+  const activePrices = priceList(active);
+  let prices;
+  let source;
+  let factor;
+
+  if (soldPrices.length >= 3) {
+    prices = soldPrices; source = "sold"; factor = 1;
+  } else if (activePrices.length >= 3) {
+    prices = activePrices; source = "active"; factor = ASK_TO_SOLD;
+  } else {
+    return null;
+  }
+
+  const med = quantile(prices, 0.5);
+  const q1 = quantile(prices, 0.25);
+  const q3 = quantile(prices, 0.75);
+  const spread = med > 0 ? (q3 - q1) / med : 1;
+
+  const photoScore = report ? clamp(parseInt(report.confidenceScore, 10) || 50, 0, 100) : 50;
+  const compScore = Math.min(prices.length / 20, 1) * 100;
+  const tightScore = clamp(100 - spread * 100, 0, 100);
+  const sourceScore = source === "sold" ? 100 : 60;
+
+  return {
+    source: source,
+    count: prices.length,
+    estimate: med * factor,
+    low: q1 * factor,
+    high: q3 * factor,
+    confidence: Math.round(0.35 * photoScore + 0.3 * compScore + 0.2 * tightScore + 0.15 * sourceScore)
+  };
+}
+
+function aiValuation(report) {
+  if (!report) return null;
+  const low = Number(report.priceLow) || 0;
+  const high = Number(report.priceHigh) || 0;
+  const single = Number(report.suggestedSalePrice) || 0;
+  let est;
+  let lo;
+  let hi;
+  if (low > 0 && high >= low) {
+    lo = low; hi = high; est = (low + high) / 2;
+  } else if (single > 0) {
+    est = single; lo = single * 0.75; hi = single * 1.25;
+  } else {
+    return null;
+  }
+  const photoScore = clamp(parseInt(report.confidenceScore, 10) || 50, 0, 100);
+  return { source: "ai", count: 0, estimate: est, low: lo, high: hi, confidence: Math.min(photoScore, 45) };
+}
+
+function setConfidenceBadge(conf) {
+  const badgeEl = $("confidenceBadge");
+  if (!badgeEl) return;
+  badgeEl.textContent = "Confidence: " + conf + "%";
+  badgeEl.className = "confidence-pill " + (conf >= 75 ? "high" : (conf >= 50 ? "med" : "low"));
+}
+
+function updateRecentScanPrice(query, price) {
+  const key = buildCompQuery(query, 7).toLowerCase();
+  const scans = getRecentScans();
+  let changed = false;
+  scans.forEach(function (s) {
+    if ((s.query || "").toLowerCase() === key) {
+      s.salePrice = price;
+      changed = true;
+    }
+  });
+  if (changed) {
+    localStorage.setItem(RECENT_SCANS_STORAGE, JSON.stringify(scans));
+    renderRecentScans();
+  }
+}
+
+function renderValuation(v) {
+  verdictActive = true;
+  const conf = clamp(v.confidence, 0, 100);
+  const badges = { sold: "eBay sold data", active: "Active listings", ai: "AI estimate" };
+  const sources = {
+    sold: "Based on " + v.count + " eBay sold listings from the last 90 days.",
+    active: "Based on " + v.count + " active eBay listings, adjusted down because asking prices run higher than sold prices.",
+    ai: "AI estimate only, because no matching eBay listings were found."
+  };
+
+  if ($("valueSourceBadge")) $("valueSourceBadge").textContent = badges[v.source];
+  if ($("valueEstimate")) $("valueEstimate").textContent = fmtMoney(v.estimate);
+  if ($("valueRange")) $("valueRange").textContent = fmtMoney(v.low) + " to " + fmtMoney(v.high);
+  if ($("valueConfidence")) {
+    $("valueConfidence").textContent = conf + "%";
+    $("valueConfidence").className = conf >= 75 ? "pos" : (conf >= 50 ? "mid" : "neg");
+  }
+
+  const notes = [sources[v.source]];
+  if (lastReport && lastReport.priceReasoning) notes.push(lastReport.priceReasoning);
+  if (lastReport && lastReport.tagVisible === false) {
+    notes.push("No readable tag was found. Add a tag close-up under Multi-Angle for a more accurate result.");
+  }
+  if (!lastReport) notes.push("This was a manual search, so no photo evidence was used.");
+  if ($("valueNote")) $("valueNote").textContent = notes.join(" ");
+
+  const traitsEl = $("valueTraits");
+  if (traitsEl) {
+    const bits = [];
+    if (lastReport && lastReport.condition) {
+      bits.push('<span class="trait-pill"><b>Condition</b> ' + escapeHtml(lastReport.condition) + "</span>");
+    }
+    if (lastReport && lastReport.rarity) {
+      bits.push('<span class="trait-pill"><b>Rarity</b> ' + escapeHtml(lastReport.rarity) + "</span>");
+    }
+    traitsEl.innerHTML = bits.join("");
+  }
+
+  setConfidenceBadge(conf);
+  if ($("salePriceInput")) {
+    $("salePriceInput").value = v.estimate.toFixed(2);
+    calculateProfitAndMaxBuy();
+  }
+  updateRecentScanPrice(currentQueryText, Math.round(v.estimate * 100) / 100);
+}
+
+function runValuation() {
+  const v = computeValuation(lastSoldItems, getActivePool(), lastReport) || aiValuation(lastReport);
+  if (v) renderValuation(v);
+}
+
+function updateVerdict(buyCost, salePrice, netProfit, maxBuy) {
+  const el = $("verdictBanner");
+  if (!el) return;
+  if (!verdictActive || salePrice <= 0) {
+    el.classList.add("hidden");
     return;
   }
-
-  if (typeof data.total === "number" && $("activeCountInput")) {
-    $("activeCountInput").value = String(data.total);
-    calculateSellThroughRate();
+  let cls;
+  let text;
+  if (buyCost <= maxBuy) {
+    cls = "buy";
+    text = "Buy. Your cost is under the max buy price of " + fmtMoney(maxBuy) + ".";
+  } else if (netProfit > 0) {
+    cls = "maybe";
+    text = "Maybe. You'd profit " + fmtMoney(netProfit) + ", which is under your target. Max buy is " + fmtMoney(maxBuy) + ".";
+  } else {
+    cls = "pass";
+    text = "Pass. You'd lose " + fmtMoney(Math.abs(netProfit)) + " at this price. Max buy is " + fmtMoney(maxBuy) + ".";
   }
-
-  const items = data.itemSummaries.slice(0, 5);
-  $("ebayApiResults").innerHTML = items.map(function (it) {
-    const price = it.price && it.price.value ? "$" + Number(it.price.value).toFixed(2) : "N/A";
-    const url = it.itemWebUrl || "#";
-    return (
-      '<a class="api-item" href="' + escapeHtml(url) + '" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;">' +
-      "<span>" + escapeHtml(it.title || fallbackQuery) + "</span>" +
-      "<strong>" + price + "</strong>" +
-      "</a>"
-    );
-  }).join("");
-  $("ebayApiResults").classList.remove("hidden");
+  el.className = "verdict " + cls;
+  el.textContent = text;
 }
 
 async function fetchEbayBrowseItems(query) {
-  if (!backendAvailable) return;
-  try {
-    const res = await fetch("/api/ebay/search?q=" + encodeURIComponent(query));
-    const data = await res.json();
-    if (!res.ok) {
-      renderEbayApiItems(null, query);
-      return;
-    }
-    renderEbayApiItems(data, query);
-  } catch (_) {
-    renderEbayApiItems(null, query);
+  lastSoldItems = [];
+  lastActiveItems = [];
+  soldTotal = null;
+  activeTotal = null;
+  currentQueryText = query;
+
+  if (!backendAvailable) {
+    renderMarketUnavailable();
+    runValuation();
+    return;
   }
+
+  const reqId = ++marketRequestId;
+  setMarketLoading();
+  runValuation(); // show the AI estimate right away while listings load
+
+  const q = encodeURIComponent(query);
+  const results = await Promise.all([
+    fetchJsonSafe("/api/ebay/sold?q=" + q),
+    fetchJsonSafe("/api/ebay/search?q=" + q)
+  ]);
+  if (reqId !== marketRequestId) return; // a newer search replaced this one
+
+  const soldRes = results[0];
+  const activeRes = results[1];
+
+  soldAvailable = Boolean(soldRes.ok && soldRes.data && soldRes.data.available);
+  if (soldAvailable) {
+    const soldData = soldRes.data.data || {};
+    lastSoldItems = (soldData.itemSales || [])
+      .map(function (it) { return normalizeListing(it, true); })
+      .sort(function (a, b) { return new Date(b.date) - new Date(a.date); });
+    if (typeof soldData.total === "number") soldTotal = soldData.total;
+  }
+
+  if (activeRes.ok && activeRes.data) {
+    lastActiveItems = (activeRes.data.itemSummaries || []).map(function (it) { return normalizeListing(it, false); });
+    if (typeof activeRes.data.total === "number") activeTotal = activeRes.data.total;
+  }
+
+  if (soldAvailable && typeof soldTotal === "number" && $("soldCountInput")) {
+    $("soldCountInput").value = String(soldTotal);
+  }
+  if (typeof activeTotal === "number" && $("activeCountInput")) {
+    $("activeCountInput").value = String(activeTotal);
+  }
+  calculateSellThroughRate();
+
+  renderMarket();
+  runValuation();
 }
 
-async function fetchEbayVisualMatches(base64Jpeg, queryHint) {
+async function fetchEbayVisualMatches(base64Jpeg) {
   if (!backendAvailable || !base64Jpeg) return;
   try {
     const res = await fetch("/api/ebay/search-by-image", {
@@ -466,15 +785,17 @@ async function fetchEbayVisualMatches(base64Jpeg, queryHint) {
     });
     const data = await res.json();
     if (!res.ok) return;
-    renderEbayApiItems(data, queryHint);
+    visualItems = (data.itemSummaries || []).map(function (it) { return normalizeListing(it, false); });
+    renderMarket();
+    runValuation();
   } catch (_) {
-    // Ignore visual API errors when unconfigured
+    // Visual search is optional; ignore errors when it is not configured
   }
 }
 
 function compressDataUrl(dataUrl, maxDim, quality) {
-  const limit = maxDim || 1600;
-  const q = quality || 0.90;
+  const limit = maxDim || 1400;
+  const q = quality || 0.88;
   return new Promise(function (resolve, reject) {
     const img = new Image();
     img.onload = function () {
@@ -516,58 +837,25 @@ function compressImageFile(file, maxDim, quality) {
   });
 }
 
-function buildBidstitchPrompt(multiMode) {
+function buildEvidencePrompt(multiMode) {
   const intro = multiMode
-    ? "You are a senior vintage & secondhand clothing authenticator like Bidstitch. Cross-check all attached photos (Tag/RN#, Front, and/or Back) step by step."
-    : "You are a senior vintage & secondhand clothing authenticator like Bidstitch. Inspect every visible detail of this item step by step.";
+    ? "You are a vintage & secondhand garment authenticator. Analyze all attached photos together (Tag/RN#, Front, and/or Back)."
+    : "You are a vintage & secondhand garment authenticator. Analyze this photo and state only concrete physical evidence.";
 
   return [
     intro,
-    "STRICT AUTHENTICATION RULES:",
-    "1. TAG & BLANK FINGERPRINTING: Read exact neck tag font, color, copyright year, RN/CA number (e.g., RN 56323 Nike, RN 14806 Carhartt, RN 15763 Hanes), country of manufacture (Made in USA vs Mexico/Honduras/China), blank brand (Screen Stars, Giant, Brockum, Hanes Beefy-T, Anvil, Gildan), and care tag style codes.",
-    "2. STITCHING & CONSTRUCTION: Check visible sleeve/bottom hem stitching (single stitch vs double stitch), collar rib width, tubular body vs side seams, and hardware/zipper markings (Talon, YKK, Scovill).",
-    "3. GRAPHIC & ERA CHECK: Identify exact print method (screenprint, plastisol, puff, embroidery, all-over print), licensing text, colorway, and exact era (e.g., 1980s, early 90s, late 90s Y2K, 2000s, Modern).",
-    "4. NO HALLUCINATION: Never guess or invent RN numbers or style codes not visible in the image. If the neck tag or hem is missing/blurry, explicitly state that and drop confidenceScore below 55.",
-    "5. BUILD 3 TARGETED COMP QUERIES (5-7 specific words each):",
-    "   - Query 1 ('Tag/Era'): Brand + Era/Tag/Blank + key subject + color",
-    "   - Query 2 ('Visual/Style'): Brand + specific graphic/cut/feature + color + item type",
-    "   - Query 3 ('Broad Comp'): Core 3-5 word fallback query",
-    "Return ONLY valid JSON with these exact keys:",
-    '{"itemName":"Exact Brand + Era/Tag + Model/Graphic + Color","estimatedEra":"e.g. Late 90s / Y2K (1998-2002)","blankOrTagType":"e.g. Nike Silver Tag / Screen Stars / Unverified","stitchingNotes":"e.g. Single stitch sleeves / Double stitch / Not visible","tagOrStyleCodes":"Exact visible codes/RN# or None visible","confidenceScore":72,"evidencePoints":["Tag/RN observation","Stitch/construction observation","Graphic/print/color observation","Era/value driver"],"candidateQueries":[{"label":"Tag/Era","query":"..."},{"label":"Visual/Style","query":"..."},{"label":"Broad","query":"..."}],"ebayShortQuery":"Best primary 5-7 word eBay comp query","suggestedSalePrice":45,"resellerTip":"Exact physical check to confirm authenticity & value before buying"}'
+    "Do NOT invent tag text, RN numbers, or style codes that are not visible. If something is not visible, say so.",
+    "Date the garment from specific clues and cite each clue you used in evidencePoints: single- vs double-stitched hems, 'Made in USA' vs other countries, RN/WPL/CA numbers, union labels (ILGWU/UNITE), care label format (paper, sewn-in, multi-language), zipper brand and hardware, copyright year printed on graphics, tag font and logo version.",
+    "Never infer an era from style alone. Lower confidenceScore whenever the neck tag or care tag is missing or blurry, and set tagVisible to false if no tag is clearly readable.",
+    "Grade condition from visible wear only (fading, cracking, stains, holes, pilling).",
+    "Give priceLow and priceHigh as a realistic US resale range in USD for this item in this condition, and explain it in one sentence in priceReasoning. If you cannot tell what the item is, use 0 for both.",
+    "Build 3 candidate queries (5-7 specific words each, avoiding generic words like 'shirt' or 'tee'):",
+    "1) Tag / Style Code query (if tag/code visible, else exact visual graphic + color)",
+    "2) Visual / Era query (graphic layout, font/arch, logo placement, color, era)",
+    "3) Broad brand + visual fallback",
+    "Return ONLY valid JSON with keys:",
+    '{"itemName":"Specific title","estimatedEra":"e.g. Modern / Y2K / 90s","tagOrStyleCodes":"Visible codes or None visible","tagVisible":true,"confidenceScore":65,"evidencePoints":["Physical observation 1","Physical observation 2"],"condition":"Good: light fading, no stains","rarity":"Common / Uncommon / Rare, with a short reason","priceLow":25,"priceHigh":45,"priceReasoning":"One sentence on why this range","candidateQueries":[{"label":"Code/Tag","query":"..."},{"label":"Visual/Era","query":"..."},{"label":"Broad","query":"..."}],"ebayShortQuery":"Best primary 5-7 word query","suggestedSalePrice":35,"resellerTip":"What to check on tag/stitching before buying"}'
   ].join("\n");
-}
-
-async function callGeminiWithFallback(apiKey, parts) {
-  const modelsToTry = [GEMINI_MODEL, "gemini-3.5-flash-lite"];
-  let lastErr = null;
-
-  for (let i = 0; i < modelsToTry.length; i++) {
-    const modelName = modelsToTry[i];
-    try {
-      const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" +
-        modelName + ":generateContent?key=" + encodeURIComponent(apiKey);
-
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: parts }],
-          generationConfig: { temperature: 0.1, response_mime_type: "application/json" }
-        })
-      });
-
-      const payload = await res.json();
-      if (!res.ok || payload.error) {
-        throw new Error((payload.error && payload.error.message) || ("HTTP " + res.status));
-      }
-
-      if ($("modelBadge")) $("modelBadge").textContent = modelName;
-      return payload;
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr || new Error("Gemini request failed");
 }
 
 function applyEvidenceResult(parsed, fallbackQuery, primaryBase64) {
@@ -583,12 +871,10 @@ function applyEvidenceResult(parsed, fallbackQuery, primaryBase64) {
 
   const titleText = parsed.itemName || cleanQuery;
   const suggestedNum = Number(parsed.suggestedSalePrice) || 0;
+  lastReport = parsed;
+  visualItems = [];
 
   if ($("itemTitleLabel")) $("itemTitleLabel").textContent = titleText;
-  if (suggestedNum > 0 && $("salePriceInput")) {
-    $("salePriceInput").value = suggestedNum.toFixed(2);
-    calculateProfitAndMaxBuy();
-  }
 
   saveRecentScan({
     title: titleText,
@@ -599,7 +885,7 @@ function applyEvidenceResult(parsed, fallbackQuery, primaryBase64) {
 
   fetchEbayBrowseItems(cleanQuery);
   if (primaryBase64) {
-    fetchEbayVisualMatches(primaryBase64, cleanQuery);
+    fetchEbayVisualMatches(primaryBase64);
   }
 }
 
@@ -610,19 +896,35 @@ async function analyzePhotoWithGemini(file) {
     return;
   }
 
-  const compressed = await compressImageFile(file, 1600, 0.90);
+  const compressed = await compressImageFile(file, 1400, 0.88);
   if ($("previewImg")) $("previewImg").src = compressed.dataUrl;
   if ($("previewWrap")) $("previewWrap").classList.remove("hidden");
   if ($("loaderBox")) $("loaderBox").classList.remove("hidden");
-  if ($("loaderText")) $("loaderText").textContent = "Running Bidstitch tag, stitch & era inspection...";
+  if ($("loaderText")) $("loaderText").textContent = "Inspecting visual & tag evidence...";
 
   try {
-    const parts = [
-      { text: buildBidstitchPrompt(false) },
-      { inline_data: { mime_type: compressed.mimeType, data: compressed.base64 } }
-    ];
+    const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" +
+      GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(apiKey);
 
-    const payload = await callGeminiWithFallback(apiKey, parts);
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: buildEvidencePrompt(false) },
+            { inline_data: { mime_type: compressed.mimeType, data: compressed.base64 } }
+          ]
+        }],
+        generationConfig: { temperature: 0.1, response_mime_type: "application/json" }
+      })
+    });
+
+    const payload = await res.json();
+    if (!res.ok || payload.error) {
+      throw new Error((payload.error && payload.error.message) || ("HTTP " + res.status));
+    }
+
     const raw = (payload.candidates &&
       payload.candidates[0] &&
       payload.candidates[0].content &&
@@ -653,8 +955,8 @@ async function applySlotCompressed(slotKey, compressed) {
 
 async function handleSlotSelect(slotKey, file) {
   if (!file) return;
-  const maxDim = slotKey === "tag" ? 2000 : 1400;
-  const compressed = await compressImageFile(file, maxDim, 0.92);
+  const maxDim = slotKey === "tag" ? 1800 : 1280;
+  const compressed = await compressImageFile(file, maxDim, 0.9);
   await applySlotCompressed(slotKey, compressed);
 }
 
@@ -664,7 +966,7 @@ function updateMultiScanButton() {
   const count = Object.values(multiPhotos).filter(Boolean).length;
   if (count > 0) {
     btn.classList.remove("hidden");
-    btn.textContent = "✨ Run Tag + Stitch Authentication (" + count + ")";
+    btn.textContent = "✨ Analyze Attached Photos (" + count + ")";
   } else {
     btn.classList.add("hidden");
   }
@@ -706,7 +1008,7 @@ async function openCameraForTarget(target) {
   activeCamTarget = target;
   const labelMap = {
     quick: "📷 Quick Item Photo",
-    tag: "📷 Snap 1. Tag / RN# Close-Up",
+    tag: "📷 Snap 1. Tag / RN#",
     front: "📷 Snap 2. Front",
     back: "📷 Snap 3. Back"
   };
@@ -740,13 +1042,13 @@ async function openCameraForTarget(target) {
   try {
     stopCameraStream();
     activeCamStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      video: { facingMode: { ideal: "environment" } },
       audio: false
     });
     if ($("camVideo")) {
       $("camVideo").srcObject = activeCamStream;
     }
-    if ($("camStatusText")) $("camStatusText").textContent = "Hold steady — tap Snap Photo when tag text is crisp.";
+    if ($("camStatusText")) $("camStatusText").textContent = "Ready — tap Snap Photo to capture.";
   } catch (err) {
     if ($("camStatusText")) {
       $("camStatusText").textContent = "Camera unavailable (" + err.message + "). Opening camera picker...";
@@ -771,18 +1073,18 @@ async function captureFromCameraModal() {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-  const rawDataUrl = canvas.toDataURL("image/jpeg", 0.94);
+  const rawDataUrl = canvas.toDataURL("image/jpeg", 0.92);
 
   closeCameraModal();
 
   if (target === "quick") {
-    const compressed = await compressDataUrl(rawDataUrl, 1600, 0.90);
+    const compressed = await compressDataUrl(rawDataUrl, 1400, 0.88);
     const blob = await (await fetch(compressed.dataUrl)).blob();
     const file = new File([blob], "quick-scan.jpg", { type: "image/jpeg" });
     analyzePhotoWithGemini(file);
   } else {
-    const maxDim = target === "tag" ? 2000 : 1400;
-    const compressed = await compressDataUrl(rawDataUrl, maxDim, 0.92);
+    const maxDim = target === "tag" ? 1800 : 1280;
+    const compressed = await compressDataUrl(rawDataUrl, maxDim, 0.9);
     await applySlotCompressed(target, compressed);
   }
 }
@@ -794,11 +1096,11 @@ async function runMultiAngleScan() {
     return;
   }
 
-  const parts = [{ text: buildBidstitchPrompt(true) }];
+  const parts = [{ text: buildEvidencePrompt(true) }];
   const labels = {
-    tag: "PHOTO 1 - NECK / CARE TAG, BLANK LABEL & RN# CLOSE-UP:",
-    front: "PHOTO 2 - FRONT VIEW (GRAPHIC, COLLAR & SLEEVE STITCH):",
-    back: "PHOTO 3 - BACK VIEW (BACK PRINT, HEM & SEAMS):"
+    tag: "PHOTO 1 - NECK / CARE TAG & RN# CLOSE-UP:",
+    front: "PHOTO 2 - FRONT VIEW OF GARMENT:",
+    back: "PHOTO 3 - BACK VIEW OF GARMENT:"
   };
 
   let attachedCount = 0;
@@ -825,10 +1127,26 @@ async function runMultiAngleScan() {
   if (firstPreview && $("previewImg")) $("previewImg").src = firstPreview;
   if ($("previewWrap")) $("previewWrap").classList.remove("hidden");
   if ($("loaderBox")) $("loaderBox").classList.remove("hidden");
-  if ($("loaderText")) $("loaderText").textContent = "Authenticating tag, blank & stitch across " + attachedCount + " photo(s)...";
+  if ($("loaderText")) $("loaderText").textContent = "Cross-checking " + attachedCount + " angle(s) for evidence...";
 
   try {
-    const payload = await callGeminiWithFallback(apiKey, parts);
+    const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" +
+      GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(apiKey);
+
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: parts }],
+        generationConfig: { temperature: 0.1, response_mime_type: "application/json" }
+      })
+    });
+
+    const payload = await res.json();
+    if (!res.ok || payload.error) {
+      throw new Error((payload.error && payload.error.message) || ("HTTP " + res.status));
+    }
+
     const raw = (payload.candidates &&
       payload.candidates[0] &&
       payload.candidates[0].content &&
@@ -923,11 +1241,12 @@ function initApp() {
       const currentVal = $("searchQueryInput") ? $("searchQueryInput").value : "";
       const q = updateCompLinks(currentVal);
       if ($("itemTitleLabel")) $("itemTitleLabel").textContent = q;
-      const saleVal = parseFloat($("salePriceInput") && $("salePriceInput").value) || 0;
+      lastReport = null;
+      visualItems = [];
       saveRecentScan({
         title: q,
         query: q,
-        salePrice: saleVal,
+        salePrice: 0,
         report: null
       });
       fetchEbayBrowseItems(q);
