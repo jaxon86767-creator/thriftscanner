@@ -1,4 +1,4 @@
-import com.sun.net.httpserver.HttpExchange;
+Get-ChildItem -Path C:\ -Filter "javac.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 5 FullNameimport com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
