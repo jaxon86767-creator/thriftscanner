@@ -22,7 +22,7 @@
   <main>
     <section class="card">
       <div class="card-title">
-        <span>1. Scan Item &amp; Angles</span>
+        <span>1. Scan Item & Angles</span>
         <span id="modelBadge" class="accent-text">gemini-3.5-flash-lite</span>
       </div>
 
@@ -113,9 +113,48 @@
       </div>
     </section>
 
+    <section class="card" id="valueCard">
+      <div class="card-title">
+        <span>2. Estimated Value</span>
+        <span id="valueSourceBadge" class="muted-text">Scan an item to estimate</span>
+      </div>
+      <div id="verdictBanner" class="verdict hidden"></div>
+      <div class="metrics-row">
+        <div class="metric-box">
+          <small>Est. resale price</small>
+          <strong id="valueEstimate">—</strong>
+        </div>
+        <div class="metric-box">
+          <small>Likely range</small>
+          <strong id="valueRange">—</strong>
+        </div>
+        <div class="metric-box">
+          <small>Confidence</small>
+          <strong id="valueConfidence">—</strong>
+        </div>
+      </div>
+      <div id="valueTraits" class="trait-row"></div>
+      <p id="valueNote" class="tip-box">Scan or search an item to see its value, based on real eBay listings.</p>
+    </section>
+
     <section class="card">
       <div class="card-title">
-        <span>2. Evidence Report &amp; eBay Comps</span>
+        <span>3. Sold &amp; Active Listings</span>
+        <span id="listingsMeta" class="muted-text">Run a scan or search</span>
+      </div>
+      <div class="listing-group-title">Sold on eBay</div>
+      <div id="soldNote" class="tip-box hidden"></div>
+      <div id="soldList" class="listing-list"></div>
+      <div class="listing-group-title">Active on eBay</div>
+      <div id="activeList" class="listing-list">
+        <div class="empty-history">Listings appear here after a scan or search.</div>
+      </div>
+      <p class="muted-text listing-footnote">Poshmark and Depop don't share public data, so open them from the links in the next section.</p>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <span>4. Evidence Report &amp; Comp Links</span>
         <span id="itemTitleLabel" class="accent-text">Nike Arched Block Swoosh Tee</span>
       </div>
 
@@ -185,17 +224,16 @@
 
       <div class="direct-comps-panel">
         <div class="direct-comps-header">
-          <span>Live eBay Listings (Java Backend)</span>
+          <span>Open full searches</span>
           <span id="compsFeedMeta" class="muted-text">Ready for query</span>
         </div>
         <div id="directCompsList" class="direct-comps-list"></div>
-        <div id="ebayApiResults" class="api-results hidden"></div>
       </div>
     </section>
 
     <section class="card">
       <div class="card-title">
-        <span>3. Profit &amp; Max Buy Calculator</span>
+        <span>5. Profit &amp; Max Buy Calculator</span>
         <span id="calcSourceBadge" class="muted-text">Java /api/calc</span>
       </div>
 
@@ -236,9 +274,10 @@
 
     <section class="card" id="recentScansCard">
       <div class="card-title">
-        <span>4. Recent Scans</span>
+        <span>6. Recent Scans</span>
         <button type="button" class="mini-clear-btn" id="clearHistoryBtn">Clear History</button>
       </div>
+      <div id="collectionTotal" class="collection-total"></div>
       <div id="recentScansList" class="recent-scans-list">
         <div class="empty-history">No scans saved yet. Run a scan or search to log items here.</div>
       </div>
