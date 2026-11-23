@@ -1,6 +1,6 @@
 const GEMINI_KEY_STORAGE = "thriftscan_gemini_key";
 const RECENT_SCANS_STORAGE = "thriftscan_recent_scans_v2";
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.8-flash";
 let backendAvailable = false;
 
 const multiPhotos = {
@@ -538,7 +538,7 @@ function buildBidstitchPrompt(multiMode) {
 }
 
 async function callGeminiWithFallback(apiKey, parts) {
-  const modelsToTry = [GEMINI_MODEL, "gemini-2.5-flash-lite"];
+  const modelsToTry = [GEMINI_MODEL, "gemini-3.5-flash-lite"];
   let lastErr = null;
 
   for (let i = 0; i < modelsToTry.length; i++) {
