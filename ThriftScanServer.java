@@ -321,7 +321,6 @@ public class ThriftScanServer {
     private static final java.util.Map<String, CacheEntry> SOLD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long SOLD_CACHE_MS = 30 * 60_000L;
 
-    // SoldComps bills 20 credits per search plus 1 per sale returned, so keep the limit modest.
     private static int soldLimit() {
         try {
             int v = Integer.parseInt(System.getenv().getOrDefault("SOLDCOMPS_LIMIT", "25"));
@@ -347,6 +346,7 @@ public class ThriftScanServer {
 
     // Never throws. Returns the JSON the browser expects, cached so repeat searches cost nothing.
     private static String fetchSoldCompsCached(String key, String query) {
+        String cleanKey = key == null ? "" : key.trim().replaceAll("^\"|\"$", "");
         String cacheKey = query.toLowerCase(Locale.ROOT);
         long now = System.currentTimeMillis();
         CacheEntry hit = SOLD_CACHE.get(cacheKey);
@@ -355,13 +355,13 @@ public class ThriftScanServer {
         }
         try {
             String used = query;
-            String raw = callSoldComps(key, used);
+            String raw = callSoldComps(cleanKey, used);
             if (!hasSoldItems(raw)) {
                 // Every word must match, so retry once with just the first three words
                 String shorter = shortenQuery(query, 3);
                 if (!shorter.equals(query)) {
                     used = shorter;
-                    raw = callSoldComps(key, used);
+                    raw = callSoldComps(cleanKey, used);
                 }
             }
             String out = "{\"available\":true,\"source\":\"soldcomps\",\"usedQuery\":\""
@@ -379,8 +379,8 @@ public class ThriftScanServer {
     }
 
     private static String callSoldComps(String key, String query) throws IOException {
-        String endpoint = "https://www.soldcomps.io/v1/sold?q=" +
-                URLEncoder.encode(query, StandardCharsets.UTF_8) + "&limit=" + soldLimit();
+        String endpoint = "https://api.sold-comps.com/v1/scrape?keyword=" +
+                URLEncoder.encode(query, StandardCharsets.UTF_8) + "&listingType=sold&site=ebay.com";
 
         URL url = new URL(endpoint);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
