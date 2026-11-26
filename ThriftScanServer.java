@@ -38,7 +38,8 @@ public class ThriftScanServer {
             String clientSecret = System.getenv("EBAY_CLIENT_SECRET");
             boolean ebayReady = clientId != null && !clientId.isBlank()
                     && clientSecret != null && !clientSecret.isBlank();
-            String json = "{\"ok\":true,\"ebayConfigured\":" + ebayReady + ",\"soldApi\":\"" + soldApiStatus + "\"}";
+            String json = "{\"ok\":true,\"ebayConfigured\":" + ebayReady + ",\"soldApi\":\"" + soldApiStatus + "\",\"soldProvider\":\""
+                    + (System.getenv("SOLDCOMPS_API_KEY") != null && !System.getenv("SOLDCOMPS_API_KEY").isBlank() ? "soldcomps" : "ebay") + "\"}";
             sendJson(exchange, 200, json);
         });
 
@@ -108,24 +109,78 @@ public class ThriftScanServer {
                 sendJson(exchange, 400, "{\"error\":\"Missing q parameter\"}");
                 return;
             }
+            String query = q.trim();
+
+            // Preferred: SoldComps (key comes from the SOLDCOMPS_API_KEY environment variable)
+            String soldKey = System.getenv("SOLDCOMPS_API_KEY");
+            if (soldKey != null && !soldKey.isBlank()) {
+                sendJson(exchange, 200, fetchSoldCompsCached(soldKey.trim(), query));
+                return;
+            }
+
+            // Fallback: eBay Marketplace Insights (approved developers only)
             long now = System.currentTimeMillis();
             if ("no_access".equals(soldApiStatus) && now < soldRetryAfter) {
                 sendJson(exchange, 200, "{\"available\":false,\"reason\":\"no_access\"}");
                 return;
             }
             try {
-                String resp = searchEbaySold(q.trim());
+                String resp = searchEbaySold(query);
                 soldApiStatus = "ok";
-                sendJson(exchange, 200, "{\"available\":true,\"data\":" + resp + "}");
+                sendJson(exchange, 200, "{\"available\":true,\"source\":\"ebay\",\"data\":" + resp + "}");
             } catch (Exception ex) {
                 String msg = ex.getMessage() == null ? "" : ex.getMessage();
                 boolean accessIssue = msg.contains("invalid_scope") || msg.contains("HTTP 401")
                         || msg.contains("HTTP 403") || msg.toLowerCase(Locale.ROOT).contains("insufficient");
-                soldApiStatus = accessIssue ? "no_access" : "error";
+                boolean notConfigured = msg.contains("environment variable is not set");
+                soldApiStatus = notConfigured ? "not_configured" : (accessIssue ? "no_access" : "error");
                 if (accessIssue) {
                     soldRetryAfter = now + 10 * 60_000L; // do not hammer eBay while access is missing
                 }
                 sendJson(exchange, 200, "{\"available\":false,\"reason\":\"" + soldApiStatus + "\"}");
+            }
+        });
+
+        // Lets the browser read eBay listing photos (for visual comparison) without CORS problems.
+        // Only eBay's image host is allowed, so this cannot be used to reach other sites.
+        server.createContext("/api/proxy-image", exchange -> {
+            String u = extractQueryParam(exchange.getRequestURI().getRawQuery(), "u");
+            if (u == null || u.isBlank()) {
+                sendJson(exchange, 400, "{\"error\":\"Missing u parameter\"}");
+                return;
+            }
+            try {
+                URL url = new URL(u);
+                String host = url.getHost().toLowerCase(Locale.ROOT);
+                boolean allowed = "https".equals(url.getProtocol())
+                        && (host.equals("ebayimg.com") || host.endsWith(".ebayimg.com"));
+                if (!allowed) {
+                    sendJson(exchange, 400, "{\"error\":\"Host not allowed\"}");
+                    return;
+                }
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+                int code = conn.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    sendJson(exchange, 502, "{\"error\":\"Image fetch failed\"}");
+                    return;
+                }
+                byte[] bytes = conn.getInputStream().readAllBytes();
+                if (bytes.length > 4_000_000) {
+                    sendJson(exchange, 502, "{\"error\":\"Image too large\"}");
+                    return;
+                }
+                String ct = conn.getContentType();
+                if (ct == null || !ct.startsWith("image/")) ct = "image/jpeg";
+                exchange.getResponseHeaders().set("Content-Type", ct);
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(bytes);
+                }
+            } catch (Exception ex) {
+                sendJson(exchange, 502, "{\"error\":\"Image fetch failed\"}");
             }
         });
 
@@ -141,7 +196,8 @@ public class ThriftScanServer {
             path = "/index.html";
         }
         Path resolved = ROOT_DIR.resolve(path.substring(1)).normalize();
-        if (!resolved.startsWith(ROOT_DIR) || !Files.exists(resolved) || Files.isDirectory(resolved)) {
+        if (!resolved.startsWith(ROOT_DIR) || !Files.exists(resolved) || Files.isDirectory(resolved)
+                || !isPublicAsset(resolved.getFileName().toString())) {
             sendText(exchange, 404, "text/plain; charset=utf-8", "Not found");
             return;
         }
@@ -152,6 +208,15 @@ public class ThriftScanServer {
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
         }
+    }
+
+    // The server shares its own folder, so only hand out real web assets (never source or secrets).
+    private static boolean isPublicAsset(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.startsWith(".")) return false;
+        return lower.endsWith(".html") || lower.endsWith(".css") || lower.endsWith(".js")
+                || lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")
+                || lower.endsWith(".svg") || lower.endsWith(".ico") || lower.endsWith(".webp");
     }
 
     private static String detectContentType(String name) {
@@ -234,6 +299,107 @@ public class ThriftScanServer {
         return resp;
     }
 
+    private static final class CacheEntry {
+        final long at;
+        final String body;
+
+        CacheEntry(long at, String body) {
+            this.at = at;
+            this.body = body;
+        }
+    }
+
+    private static final class SoldApiException extends IOException {
+        final String reason;
+
+        SoldApiException(String reason) {
+            super(reason);
+            this.reason = reason;
+        }
+    }
+
+    private static final java.util.Map<String, CacheEntry> SOLD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long SOLD_CACHE_MS = 30 * 60_000L;
+
+    // SoldComps bills 20 credits per search plus 1 per sale returned, so keep the limit modest.
+    private static int soldLimit() {
+        try {
+            int v = Integer.parseInt(System.getenv().getOrDefault("SOLDCOMPS_LIMIT", "25"));
+            return Math.max(5, Math.min(200, v));
+        } catch (NumberFormatException e) {
+            return 25;
+        }
+    }
+
+    private static String shortenQuery(String query, int maxWords) {
+        String[] words = query.trim().split("\\s+");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < words.length && i < maxWords; i++) {
+            if (i > 0) sb.append(' ');
+            sb.append(words[i]);
+        }
+        return sb.toString();
+    }
+
+    private static boolean hasSoldItems(String raw) {
+        return Pattern.compile("\"items\"\\s*:\\s*\\[\\s*\\{").matcher(raw).find();
+    }
+
+    // Never throws. Returns the JSON the browser expects, cached so repeat searches cost nothing.
+    private static String fetchSoldCompsCached(String key, String query) {
+        String cacheKey = query.toLowerCase(Locale.ROOT);
+        long now = System.currentTimeMillis();
+        CacheEntry hit = SOLD_CACHE.get(cacheKey);
+        if (hit != null && now - hit.at < SOLD_CACHE_MS) {
+            return hit.body;
+        }
+        try {
+            String used = query;
+            String raw = callSoldComps(key, used);
+            if (!hasSoldItems(raw)) {
+                // Every word must match, so retry once with just the first three words
+                String shorter = shortenQuery(query, 3);
+                if (!shorter.equals(query)) {
+                    used = shorter;
+                    raw = callSoldComps(key, used);
+                }
+            }
+            String out = "{\"available\":true,\"source\":\"soldcomps\",\"usedQuery\":\""
+                    + escapeJson(used) + "\",\"data\":" + raw + "}";
+            SOLD_CACHE.put(cacheKey, new CacheEntry(now, out));
+            soldApiStatus = "ok";
+            return out;
+        } catch (SoldApiException ex) {
+            soldApiStatus = ex.reason;
+            return "{\"available\":false,\"reason\":\"" + ex.reason + "\"}";
+        } catch (Exception ex) {
+            soldApiStatus = "error";
+            return "{\"available\":false,\"reason\":\"error\"}";
+        }
+    }
+
+    private static String callSoldComps(String key, String query) throws IOException {
+        String endpoint = "https://www.soldcomps.io/v1/sold?q=" +
+                URLEncoder.encode(query, StandardCharsets.UTF_8) + "&limit=" + soldLimit();
+
+        URL url = new URL(endpoint);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("GET");
+        conn.setConnectTimeout(10_000);
+        conn.setReadTimeout(25_000);
+        conn.setRequestProperty("Authorization", "Bearer " + key);
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setRequestProperty("User-Agent", "ThriftScanPro/1.0");
+
+        int code = conn.getResponseCode();
+        String resp = readStream(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
+        if (code == 401 || code == 403) throw new SoldApiException("invalid_key");
+        if (code == 402 || code == 429) throw new SoldApiException("quota");
+        if (code < 200 || code >= 300) throw new SoldApiException("error");
+        if (!resp.trim().startsWith("{")) throw new SoldApiException("error");
+        return resp.trim();
+    }
+
     // Needs the buy.marketplace.insights scope, which eBay grants only to approved developers.
     private static String searchEbaySold(String query) throws IOException {
         String token = getEbayAppToken(SCOPE_INSIGHTS);
@@ -256,7 +422,7 @@ public class ThriftScanServer {
 
     private static String searchEbayByImage(String base64Image) throws IOException {
         String token = getEbayAppToken();
-        String endpoint = "https://api.ebay.com/buy/browse/v1/item_summary/search_by_image?limit=10";
+        String endpoint = "https://api.ebay.com/buy/browse/v1/item_summary/search_by_image?limit=20";
         String payload = "{\"image\":\"" + base64Image + "\"}";
 
         URL url = new URL(endpoint);
