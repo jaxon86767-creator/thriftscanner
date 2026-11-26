@@ -98,6 +98,10 @@ function cleanPhrase(text) {
 }
 
 // Adds "-lot -bundle ..." so multi-item lots and kids' sizes drop out of results
+function shortQuery(q) {
+  return String(q || "").split(" ").filter(Boolean).slice(0, 5).join(" ");
+}
+
 function withExclusions(q) {
   const lower = " " + q.toLowerCase() + " ";
   return q + EXCLUDE_TERMS
@@ -136,7 +140,7 @@ function renderDirectCompsFeed(cleanQuery) {
   const metaEl = $("compsFeedMeta");
   if (!listEl) return;
 
-  const broad = withExclusions(cleanQuery);
+  const broad = withExclusions(shortQuery(cleanQuery));
   const closest = buildClosestMatch(cleanQuery);
   const closestQ = closest.tight ? closest.query : withExclusions(closest.query);
 
@@ -177,7 +181,7 @@ function updateCompLinks(query, opts) {
   currentQueryText = clean;
   if ($("searchQueryInput")) $("searchQueryInput").value = clean;
 
-  const broad = withExclusions(clean);
+  const broad = withExclusions(shortQuery(clean));
   const closest = buildClosestMatch(clean);
   const closestQ = closest.tight ? closest.query : withExclusions(closest.query);
 
@@ -333,9 +337,10 @@ function renderRecentScans() {
       if (!entry) return;
 
       lastReport = entry.report || null;
+      scanKey = entry.query;
       const clean = updateCompLinks(entry.query);
       if ($("itemTitleLabel")) $("itemTitleLabel").textContent = entry.title || clean;
-      visualItems = [];
+      resetVisual();
       if (entry.report) renderEvidenceReport(entry.report);
       if (typeof entry.salePrice === "number" && entry.salePrice > 0 && $("salePriceInput")) {
         $("salePriceInput").value = entry.salePrice.toFixed(2);
@@ -454,6 +459,14 @@ let soldTotal = null;
 let activeTotal = null;
 let verdictActive = false;
 let currentQueryText = "";
+let scanKey = "";
+let visualState = "idle"; // idle | searching | verifying | done | unverified | failed
+let visualError = "";
+let visualRequestId = 0;
+let deferSold = false; // hold the sold lookup until the photo has picked the best search words
+let soldReason = "";
+let soldExcluded = 0;
+let soldQueryUsed = "";
 let marketRequestId = 0;
 
 // Active asking prices usually run above what items really sell for. Tune this with your own results.
@@ -489,6 +502,21 @@ function normalizeListing(it, sold) {
     img: pickImage(it),
     condition: it.condition || "",
     date: sold ? (it.lastSoldDate || "") : ""
+  };
+}
+
+// SoldComps sale -> the shape the listing UI uses. Lots, for-parts and hidden Best Offer prices are flagged.
+function normalizeSoldComp(it) {
+  const p = it.sold_price || {};
+  const img = it.image || it.image_url || it.photo || it.thumbnail || "";
+  return {
+    title: it.title || "",
+    price: Number(p.value) || 0,
+    url: it.url || "",
+    img: typeof img === "string" ? img : ((img && img.url) || ""),
+    condition: it.condition || "",
+    date: it.sold_at || "",
+    flagged: (Array.isArray(it.flags) && it.flags.length > 0) || it.best_offer_accepted === true
   };
 }
 
@@ -541,6 +569,14 @@ function setMarketLoading() {
   if ($("soldNote")) $("soldNote").classList.add("hidden");
 }
 
+function soldNoteText() {
+  if (soldReason === "pending") return "Comparing your photo first, so the sold search uses the same words real sellers used.";
+  if (soldReason === "invalid_key") return "The sold-data API key was rejected. Check the SOLDCOMPS_API_KEY setting on the server.";
+  if (soldReason === "quota") return "The sold-data service hit its credit or rate limit. Try again later or check your plan.";
+  if (soldReason === "error") return "Couldn't reach the sold-data service right now. Use the sold links below in the meantime.";
+  return "Sold data isn't connected yet. Add a SoldComps API key (SOLDCOMPS_API_KEY) on the server, or use the sold links below.";
+}
+
 function renderMarket() {
   const soldEl = $("soldList");
   const activeEl = $("activeList");
@@ -557,7 +593,7 @@ function renderMarket() {
     soldEl.innerHTML = "";
     if (noteEl) {
       noteEl.classList.remove("hidden");
-      noteEl.textContent = "eBay only shares sold prices with approved developers, and this app doesn't have that access yet. The value above uses active listings instead. Open the sold links below to check sold prices by hand.";
+      noteEl.textContent = soldNoteText();
     }
   }
 
@@ -569,6 +605,7 @@ function renderMarket() {
   if (metaEl) {
     const bits = [];
     if (soldAvailable && typeof soldTotal === "number") bits.push(soldTotal + " sold (90 days)");
+    if (soldAvailable && soldExcluded) bits.push(soldExcluded + " lots/offers left out");
     if (typeof activeTotal === "number") bits.push(activeTotal + " active");
     const closeCount = closeMatches(soldAvailable ? lastSoldItems.concat(pool) : pool).length;
     if (pool.length || lastSoldItems.length) bits.push(closeCount + " close matches");
@@ -638,6 +675,7 @@ function closeMatches(items) {
 function computeValuation(sold, active, report) {
   const closeSold = closeMatches(sold);
   const closeActive = closeMatches(active);
+  const verified = visualItems.filter(function (i) { return i.verified && i.price > 0; });
   let list;
   let source;
   let factor;
@@ -646,6 +684,8 @@ function computeValuation(sold, active, report) {
   // Prefer close matches. Only fall back to broader results if close ones are scarce.
   if (priceList(closeSold).length >= 3) {
     list = closeSold; source = "sold"; factor = 1;
+  } else if (verified.length >= 2) {
+    list = verified; source = "visual"; factor = ASK_TO_SOLD;
   } else if (priceList(closeActive).length >= 3) {
     list = closeActive; source = "active"; factor = ASK_TO_SOLD;
   } else if (priceList(sold).length >= 3) {
@@ -662,10 +702,12 @@ function computeValuation(sold, active, report) {
   const q3 = quantile(prices, 0.75);
   const spread = med > 0 ? (q3 - q1) / med : 1;
 
-  const photoScore = report ? clamp(parseInt(report.confidenceScore, 10) || 50, 0, 100) : 50;
+  const photoScore = source === "visual"
+    ? avgVisualScore(verified)
+    : (report ? clamp(parseInt(report.confidenceScore, 10) || 50, 0, 100) : 50);
   const compScore = Math.min(prices.length / 20, 1) * 100;
   const tightScore = clamp(100 - spread * 100, 0, 100);
-  const sourceScore = source === "sold" ? 100 : 60;
+  const sourceScore = source === "sold" ? 100 : (source === "visual" ? 85 : 60);
   let confidence = Math.round(0.35 * photoScore + 0.3 * compScore + 0.2 * tightScore + 0.15 * sourceScore);
   if (loose) confidence = Math.max(0, confidence - 15);
 
@@ -725,11 +767,12 @@ function updateRecentScanPrice(query, price) {
 function renderValuation(v) {
   verdictActive = true;
   const conf = clamp(v.confidence, 0, 100);
-  const badges = { sold: "eBay sold data", active: "Active listings", ai: "AI estimate" };
+  const badges = { sold: "eBay sold data", visual: "Visual match", active: "Active listings", ai: "AI estimate" };
   const kind = v.loose ? "" : " closely matching";
   const sources = {
     sold: "Based on " + v.count + kind + " eBay sold listings from the last 90 days.",
     active: "Based on " + v.count + kind + " active eBay listings, adjusted down because asking prices run higher than sold prices.",
+    visual: "Based on " + v.count + " listings that look like your exact item, adjusted down because asking prices run higher than sold prices.",
     ai: "AI estimate only, because no matching eBay listings were found."
   };
 
@@ -767,7 +810,7 @@ function renderValuation(v) {
     $("salePriceInput").value = v.estimate.toFixed(2);
     calculateProfitAndMaxBuy();
   }
-  updateRecentScanPrice(currentQueryText, Math.round(v.estimate * 100) / 100);
+  updateRecentScanPrice(scanKey || currentQueryText, Math.round(v.estimate * 100) / 100);
 }
 
 function runValuation() {
@@ -803,6 +846,8 @@ async function fetchEbayBrowseItems(query) {
   lastActiveItems = [];
   soldTotal = null;
   activeTotal = null;
+  soldExcluded = 0;
+  soldQueryUsed = "";
   currentQueryText = query;
 
   if (!backendAvailable) {
@@ -816,8 +861,9 @@ async function fetchEbayBrowseItems(query) {
   runValuation(); // show the AI estimate right away while listings load
 
   const q = encodeURIComponent(query);
+  const skipSold = deferSold;
   const results = await Promise.all([
-    fetchJsonSafe("/api/ebay/sold?q=" + q),
+    skipSold ? Promise.resolve({ ok: false, data: null }) : fetchJsonSafe("/api/ebay/sold?q=" + q),
     fetchJsonSafe("/api/ebay/search?q=" + q)
   ]);
   if (reqId !== marketRequestId) return; // a newer search replaced this one
@@ -826,13 +872,22 @@ async function fetchEbayBrowseItems(query) {
   const activeRes = results[1];
 
   soldAvailable = Boolean(soldRes.ok && soldRes.data && soldRes.data.available);
+  soldReason = soldAvailable ? "" : (skipSold ? "pending" : ((soldRes.data && soldRes.data.reason) || "error"));
   if (soldAvailable) {
     const soldData = soldRes.data.data || {};
-    lastSoldItems = scoreAndSort(
-      (soldData.itemSales || []).map(function (it) { return normalizeListing(it, true); }),
-      true
-    );
-    if (typeof soldData.total === "number") soldTotal = soldData.total;
+    if (soldRes.data.source === "soldcomps") {
+      const all = (soldData.items || []).map(normalizeSoldComp);
+      soldExcluded = all.filter(function (i) { return i.flagged; }).length;
+      lastSoldItems = scoreAndSort(all.filter(function (i) { return !i.flagged; }), true);
+      if (typeof soldData.count === "number") soldTotal = soldData.count;
+      soldQueryUsed = soldRes.data.usedQuery || query;
+    } else {
+      lastSoldItems = scoreAndSort(
+        (soldData.itemSales || []).map(function (it) { return normalizeListing(it, true); }),
+        true
+      );
+      if (typeof soldData.total === "number") soldTotal = soldData.total;
+    }
   }
 
   if (activeRes.ok && activeRes.data) {
@@ -855,8 +910,199 @@ async function fetchEbayBrowseItems(query) {
   runValuation();
 }
 
+// ---------- Visual matching: compare the user's photo with real listing photos ----------
+const VISUAL_MATCH_MIN = 70;
+const TITLE_NOISE = ["vintage", "nwt", "nwot", "euc", "guc", "vgc", "new", "used", "preowned", "pre", "owned",
+  "size", "mens", "men", "womens", "women", "unisex", "adult", "xs", "xl", "xxl", "xxxl", "small", "medium", "large",
+  "tee", "tees", "shirt", "t-shirt", "tshirt", "free", "shipping", "rare", "authentic", "original", "the", "and",
+  "with", "for", "of", "in", "from", "style", "casual", "preowned", "condition", "great", "good"];
+
+function avgVisualScore(items) {
+  if (!items.length) return 50;
+  const sum = items.reduce(function (t, i) { return t + (typeof i.vscore === "number" ? i.vscore : 80); }, 0);
+  return Math.round(sum / items.length);
+}
+
+function resetVisual() {
+  visualRequestId++;
+  deferSold = false;
+  visualItems = [];
+  visualState = "idle";
+  visualError = "";
+  renderVisual();
+}
+
+function visualCardHtml(it, i) {
+  const scored = typeof it.vscore === "number";
+  const thumb = it.img
+    ? '<img loading="lazy" src="' + escapeHtml(safeUrl(it.img)) + '" alt="" />'
+    : '<div class="listing-thumb-empty"></div>';
+  const badge = scored
+    ? '<span class="vscore ' + (it.verified ? "good" : "weak") + '">' + it.vscore + "% match</span>"
+    : "";
+  return (
+    '<div class="visual-card' + (it.verified ? " match" : "") + '" data-vidx="' + i + '">' +
+    thumb + badge +
+    '<div class="visual-title">' + escapeHtml(it.title) + "</div>" +
+    '<div class="visual-price">' + (it.price > 0 ? fmtMoney(it.price) : "N/A") + "</div>" +
+    (it.vreason ? "<small>" + escapeHtml(it.vreason) + "</small>" : "") +
+    '<a class="visual-open" href="' + escapeHtml(safeUrl(it.url)) + '" target="_blank" rel="noopener">Open on eBay</a>' +
+    "</div>"
+  );
+}
+
+function renderVisual() {
+  const block = $("visualBlock");
+  const list = $("visualList");
+  const note = $("visualNote");
+  if (!block || !list) return;
+
+  if (visualState === "idle") {
+    block.classList.add("hidden");
+    return;
+  }
+  block.classList.remove("hidden");
+
+  let msg = "";
+  if (visualState === "searching") msg = "Searching eBay for items that look like your photo...";
+  else if (visualState === "verifying") msg = "Comparing your photo to " + Math.min(visualItems.length, 10) + " listings...";
+  else if (visualState === "failed") msg = visualError || "Visual search isn't available right now.";
+  else if (visualState === "unverified") msg = "Couldn't compare automatically (check your Gemini key). These are eBay's closest visual results, so check them yourself. Tap a card to mark it as the same item.";
+  else if (visualState === "done") {
+    const n = visualItems.filter(function (v) { return v.verified; }).length;
+    msg = n
+      ? n + " listing(s) look like the same item. Tap a card to mark it as the same item or not."
+      : "No listing looks like the same item. These are the closest visual results, for reference. Tap one to mark it as the same.";
+  }
+  if (note) {
+    note.textContent = msg;
+    note.classList.toggle("hidden", !msg);
+  }
+
+  const you = $("previewImg") && $("previewImg").src
+    ? '<div class="visual-you"><img src="' + escapeHtml($("previewImg").src) + '" alt="Your photo" /><small>Your photo</small></div>'
+    : "";
+  list.innerHTML = you + visualItems.slice(0, 8).map(visualCardHtml).join("");
+}
+
+async function proxyImageToBase64(url) {
+  try {
+    const res = await fetch("/api/proxy-image?u=" + encodeURIComponent(url));
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    const mime = blob.type && blob.type.indexOf("image/") === 0 ? blob.type : "image/jpeg";
+    const dataUrl = await new Promise(function (resolve, reject) {
+      const r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.onerror = reject;
+      r.readAsDataURL(blob);
+    });
+    return { mime: mime, data: String(dataUrl).split(",")[1] };
+  } catch (_) {
+    return null;
+  }
+}
+
+// Ask Gemini to compare the user's photo against each listing photo, strictly.
+async function verifyVisualMatches(userBase64) {
+  const apiKey = localStorage.getItem(GEMINI_KEY_STORAGE) || "";
+  const cands = visualItems.filter(function (it) { return it.img; }).slice(0, 10);
+  if (!apiKey || !cands.length) return false;
+
+  const imgs = await Promise.all(cands.map(function (it) { return proxyImageToBase64(it.img); }));
+  const sent = [];
+  const parts = [{
+    text: "You compare a thrifted garment photo against eBay listing photos. For each CANDIDATE decide if it is the SAME design as YOUR ITEM: same brand line, same graphic or print, same colorway, same cut. Be strict. A different graphic, color, or style is NOT a match even if the brand and garment type are the same. Judge by the images; listing titles can be wrong. " +
+      'Return ONLY JSON: {"matches":[{"index":0,"sameDesign":true,"score":85,"reason":"short visual reason"}]} with one entry per candidate, score 0-100.'
+  }, { text: "YOUR ITEM:" }, { inline_data: { mime_type: "image/jpeg", data: userBase64 } }];
+
+  cands.forEach(function (it, i) {
+    if (!imgs[i]) return;
+    sent.push(it);
+    parts.push({ text: "CANDIDATE " + (sent.length - 1) + " (title: " + it.title + "):" });
+    parts.push({ inline_data: { mime_type: imgs[i].mime, data: imgs[i].data } });
+  });
+  if (!sent.length) return false;
+
+  try {
+    const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" +
+      GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(apiKey);
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: parts }],
+        generationConfig: { temperature: 0, response_mime_type: "application/json" }
+      })
+    });
+    const payload = await res.json();
+    if (!res.ok || payload.error) return false;
+    const raw = (payload.candidates && payload.candidates[0] && payload.candidates[0].content &&
+      payload.candidates[0].content.parts && payload.candidates[0].content.parts[0] &&
+      payload.candidates[0].content.parts[0].text) || "{}";
+    const parsed = JSON.parse(raw.replace(/```json|```/gi, "").trim());
+    (parsed.matches || []).forEach(function (m) {
+      const it = sent[Number(m.index)];
+      if (!it) return;
+      const score = clamp(parseInt(m.score, 10) || 0, 0, 100);
+      it.vscore = score;
+      it.vreason = String(m.reason || "").slice(0, 110);
+      it.verified = m.sameDesign === true && score >= VISUAL_MATCH_MIN;
+    });
+    sent.sort(function (a, b) { return (b.vscore || 0) - (a.vscore || 0); });
+    visualItems = sent; // keep only the listings that were actually compared
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function tokenizeTitle(t) {
+  return String(t || "").toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9-]+/g, " ").split(" ")
+    .filter(function (w) {
+      return w.length >= 2 && TITLE_NOISE.indexOf(w) === -1 && !/^\d{1,2}$/.test(w) && !/^\d{2}x\d{2}$/.test(w);
+    });
+}
+
+// Build a short search from the words real sellers used in the matched listings' titles
+function queryFromTitles(titles) {
+  const lists = titles.map(tokenizeTitle);
+  if (!lists.length || !lists[0].length) return "";
+  const need = lists.length >= 3 ? 2 : lists.length;
+  const out = [];
+  lists[0].forEach(function (tok) {
+    if (out.indexOf(tok) !== -1) return;
+    const count = lists.filter(function (l) { return l.indexOf(tok) !== -1; }).length;
+    if (count >= need) out.push(tok);
+  });
+  const picked = out.length >= 2 ? out : lists[0];
+  return picked.slice(0, 5).join(" ");
+}
+
+function adoptMatchedQuery() {
+  const good = visualItems.filter(function (it) { return it.verified; });
+  if (!good.length) return false;
+  const q = queryFromTitles(good.slice(0, 3).map(function (it) { return it.title; }));
+  if (!q) return false;
+  if (lastReport) {
+    lastReport.mustHaveWords = q.split(" ").slice(0, 4);
+    lastReport.exactPhrase = "";
+  }
+  const clean = updateCompLinks(q, { keepCandidates: true });
+  fetchEbayBrowseItems(clean);
+  return true;
+}
+
 async function fetchEbayVisualMatches(base64Jpeg) {
   if (!backendAvailable || !base64Jpeg) return;
+  const reqId = ++visualRequestId;
+  visualState = "searching";
+  visualError = "";
+  deferSold = true; // sold lookups cost credits, so wait for the better search words
+  renderVisual();
+
+  let stale = false;
+  let adopted = false;
   try {
     const res = await fetch("/api/ebay/search-by-image", {
       method: "POST",
@@ -864,15 +1110,41 @@ async function fetchEbayVisualMatches(base64Jpeg) {
       body: JSON.stringify({ imageBase64: base64Jpeg })
     });
     const data = await res.json();
-    if (!res.ok) return;
-    visualItems = scoreAndSort(
-      (data.itemSummaries || []).map(function (it) { return normalizeListing(it, false); }),
-      false
-    );
-    renderMarket();
+    if (reqId !== visualRequestId) { stale = true; return; }
+    if (!res.ok) {
+      visualState = "failed";
+      visualError = "eBay visual search failed. Check your eBay keys and API access.";
+      renderVisual();
+      return;
+    }
+
+    visualItems = (data.itemSummaries || []).map(function (it) { return normalizeListing(it, false); });
+    if (!visualItems.length) {
+      visualState = "done";
+      renderVisual();
+      return;
+    }
+
+    visualState = "verifying";
+    renderVisual();
+    const ok = await verifyVisualMatches(base64Jpeg);
+    if (reqId !== visualRequestId) { stale = true; return; }
+
+    visualState = ok ? "done" : "unverified";
+    renderVisual();
+    deferSold = false;
+    if (ok) adopted = adoptMatchedQuery();
     runValuation();
   } catch (_) {
-    // Visual search is optional; ignore errors when it is not configured
+    if (reqId !== visualRequestId) { stale = true; return; }
+    visualState = "failed";
+    visualError = "Visual search isn't available right now.";
+    renderVisual();
+  } finally {
+    if (!stale) {
+      deferSold = false;
+      if (!adopted) fetchEbayBrowseItems(currentQueryText);
+    }
   }
 }
 
@@ -958,7 +1230,8 @@ function applyEvidenceResult(parsed, fallbackQuery, primaryBase64) {
   const titleText = parsed.itemName || cleanQuery;
   const suggestedNum = Number(parsed.suggestedSalePrice) || 0;
   lastReport = parsed;
-  visualItems = [];
+  scanKey = cleanQuery;
+  resetVisual();
 
   if ($("itemTitleLabel")) $("itemTitleLabel").textContent = titleText;
 
@@ -969,6 +1242,7 @@ function applyEvidenceResult(parsed, fallbackQuery, primaryBase64) {
     report: parsed
   });
 
+  if (primaryBase64 && backendAvailable) deferSold = true;
   fetchEbayBrowseItems(cleanQuery);
   if (primaryBase64) {
     fetchEbayVisualMatches(primaryBase64);
@@ -1196,8 +1470,6 @@ async function runMultiAngleScan() {
   ["tag", "front", "back"].forEach(function (key) {
     if (multiPhotos[key]) {
       attachedCount++;
-      if (!firstPreview) firstPreview = multiPhotos[key].dataUrl;
-      if (!primaryBase64) primaryBase64 = multiPhotos[key].base64;
       parts.push({ text: labels[key] });
       parts.push({
         inline_data: {
@@ -1209,6 +1481,10 @@ async function runMultiAngleScan() {
   });
 
   if (attachedCount === 0) return;
+
+  const hero = multiPhotos.front || multiPhotos.back || multiPhotos.tag;
+  firstPreview = hero.dataUrl;
+  primaryBase64 = hero.base64;
 
   if (firstPreview && $("previewImg")) $("previewImg").src = firstPreview;
   if ($("previewWrap")) $("previewWrap").classList.remove("hidden");
@@ -1250,6 +1526,19 @@ async function runMultiAngleScan() {
 }
 
 function initApp() {
+  const visualListEl = $("visualList");
+  if (visualListEl) {
+    visualListEl.addEventListener("click", function (ev) {
+      if (ev.target.closest && ev.target.closest("a")) return;
+      const card = ev.target.closest ? ev.target.closest("[data-vidx]") : null;
+      if (!card) return;
+      const it = visualItems[parseInt(card.getAttribute("data-vidx"), 10)];
+      if (!it) return;
+      it.verified = !it.verified;
+      renderVisual();
+      runValuation();
+    });
+  }
   if ($("modelBadge")) $("modelBadge").textContent = GEMINI_MODEL;
   if ($("apiKeyInput")) $("apiKeyInput").value = localStorage.getItem(GEMINI_KEY_STORAGE) || "";
 
@@ -1329,7 +1618,8 @@ function initApp() {
       const q = updateCompLinks(currentVal);
       if ($("itemTitleLabel")) $("itemTitleLabel").textContent = q;
       lastReport = null;
-      visualItems = [];
+      scanKey = q;
+      resetVisual();
       saveRecentScan({
         title: q,
         query: q,
